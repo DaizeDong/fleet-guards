@@ -18,8 +18,24 @@
 # destroy is not a verdict. Belt and braces: the same scan runs in CI (.github/workflows/
 # pii-guard.yml), which no local shell quirk and no --no-verify can reach.
 ROOT="$(git rev-parse --show-toplevel)"
-GUARD="$ROOT/tools/pii_guard.py"
-BOUNDARY="$ROOT/tools/data_boundary.py"
+# WHERE THE GUARDS LIVE, in either of the two shapes this kit ships in.
+#
+# Vendored: the tools sit at <repo>/tools/ alongside a copy of this hook.
+# Submodule: the tools sit inside the submodule, and this hook is being run FROM that submodule
+# because core.hooksPath points into it, so the submodule root is simply this file's parent parent.
+#
+# Resolving from THIS FILE rather than hardcoding either layout is what lets both forms coexist
+# during the migration. A hook that assumed one shape would silently find no scanner in the other,
+# and "no scanner" is the exact state that used to mean "pass quietly".
+_HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+_KIT="$(cd "$_HOOK_DIR/.." && pwd)"
+if [ -f "$_KIT/tools/pii_guard.py" ]; then
+  GUARD="$_KIT/tools/pii_guard.py"
+  BOUNDARY="$_KIT/tools/data_boundary.py"
+else
+  GUARD="$ROOT/tools/pii_guard.py"
+  BOUNDARY="$ROOT/tools/data_boundary.py"
+fi
 # FAIL CLOSED on a missing guard, same as the interpreter probe below and for the same reason:
 # `|| exit 0` meant deleting one file silently switched push protection off and printed nothing,
 # so a disarmed hook and a passing hook produced identical output. Demonstrated 2026-08-30 by
