@@ -49,7 +49,7 @@ jobs:
       # and every one of them is a property whose violation used to be silent.
       - name: Policy-layer tests (can the private layer still prove it loaded?)
         run: |
-          test -f tools/test_pii_guard_v2.py || { echo "::error::tools/test_pii_guard_v2.py is MISSING -- re-vendor it (install.py)"; exit 1; }
+          test -f tools/test_pii_guard_v2.py || { echo "::error::tools/test_pii_guard_v2.py is MISSING -- this is the kit's OWN repo, so the file was deleted, not un-vendored"; exit 1; }
           python -m pytest tools/test_pii_guard_v2.py -q
 
       # The resolver's tests. datadir.py decides WHERE real-run output goes, which makes it the one
@@ -60,11 +60,11 @@ jobs:
       # NOT wrapped in `if [ -f ... ]`. Both steps used to be, and that made THE AUTHORITY fail open:
       # a repo whose vendored copy was missing (a stale default branch, a bad merge, a deletion) went
       # green on a step that never ran. Every repo in this fleet is supposed to carry these files --
-      # install.py ships them -- so ABSENT is a failure, not a reason to skip. Verified 2026-07-31 by
+      # This repo IS the kit, so ABSENT is a deletion, not a reason to skip. Verified 2026-07-31 by
       # deleting each file and watching the step exit non-zero.
       - name: Resolver tests (does the data pipe still point outside this repo?)
         run: |
-          test -f tools/test_datadir.py || { echo "::error::tools/test_datadir.py is MISSING -- re-vendor it (install.py); a guard that is not here is not a guard"; exit 1; }
+          test -f tools/test_datadir.py || { echo "::error::tools/test_datadir.py is MISSING -- this is the kit's OWN repo, so the file was deleted, not un-vendored"; exit 1; }
           python -m pytest tools/test_datadir.py -q
 
       # The DATA BOUNDARY -- the primary control. Runs FIRST, because it is the question that
@@ -78,11 +78,12 @@ jobs:
       # tracked, every declared DATA path ships only a schema, and every FIXTURE must be byte-
       # identical to what its generator emits -- because a real record cannot be regenerated.
       #
-      # A missing .dataclass.json is caught by install.py, which refuses to ship the scanner into a
+      # A missing .dataclass.json is caught by the step below, and by the scaffolder, which refuses
+      # to wire the gates into a
       # repo that cannot arm it. A missing SCANNER is caught here: see the note on the step above.
       - name: Data boundary (is this an uninitialized tool?)
         run: |
-          test -f tools/data_boundary.py || { echo "::error::tools/data_boundary.py is MISSING -- re-vendor it (install.py); the PRIMARY control cannot be optional"; exit 1; }
+          test -f tools/data_boundary.py || { echo "::error::tools/data_boundary.py is MISSING -- this is the kit's OWN repo; the PRIMARY control cannot be optional"; exit 1; }
           test -f .dataclass.json || { echo "::error::.dataclass.json is MISSING -- data_boundary would exit 0 on every run and leave the primary control inert"; exit 1; }
           python tools/data_boundary.py
 
