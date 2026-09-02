@@ -215,15 +215,7 @@ PUBLIC_DOTPATH_RE = re.compile(
 NOT_A_DOMAIN_RE = re.compile(r"^(pytest|mark|fixture|param|parametrize|patch|mock|staticmethod|"
                              r"classmethod|property|dataclass|app|router|task)\b", re.I)
 
-# `guards` is the kit consumed as a git submodule. It is skipped for a reason that is NOT "we do not
-# want to look": a submodule is a separate repository with its own remote, its own hooks and its own
-# CI, and it is scanned there. Scanning it from a consumer would also fail on Windows, because git
-# gives a submodule directory an entry a plain walk cannot read, which produced a PermissionError and
-# the honest but useless line "1 item was NOT examined, so this is not a clean bill of health" on
-# EVERY commit in EVERY consuming repo. That line is a rare and important signal; making it routine
-# is how people learn to scroll past it.
-SKIP_DIR = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".pytest_cache",
-            "guards"}
+SKIP_DIR = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".pytest_cache"}
 # The guard and its tests MUST contain the shapes they detect -- a test proving a real-looking phone
 # number is caught has to contain a real-looking phone number. So the STRUCTURAL checks are skipped
 # on them. The PRIVATE DENYLIST is NOT: without that, "name it test_pii_guard.py" would be a hole
@@ -1313,6 +1305,42 @@ def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, stri
         out.append((where, label, value, "BLOCK"))
 
 
+
+def _in_submodule(root, rel, _cache={}):
+    """Is `rel` inside a git submodule of `root`?
+
+    A submodule is skipped for a reason that is NOT "we do not want to look": it is a separate
+    repository with its own remote, its own hooks and its own CI, and it is scanned there. Scanning
+    it from a consumer also fails on Windows, because git gives a submodule directory an entry a
+    plain walk cannot read. That produced a PermissionError and the honest but useless line "1 item
+    was NOT examined, so this is not a clean bill of health" on EVERY commit in EVERY consuming
+    repo. That line is a rare and important signal, and making it routine is how people learn to
+    scroll past it.
+
+    DETECTED BY SHAPE, NOT BY NAME. This was a hardcoded {"guards"} until a second kit was split out
+    and every consumer grew a `style/` directory, at which point the same useless line came back
+    everywhere. A name list is a list of the submodules somebody remembered; the next one is silent
+    again. `.git` as a FILE rather than a directory is git's own marker for "this worktree belongs
+    to a parent", and it needs no maintenance.
+
+    Cached per root: this runs once per tracked file and the answer cannot change mid-scan.
+    """
+    key = os.path.realpath(root)
+    subs = _cache.get(key)
+    if subs is None:
+        subs = set()
+        try:
+            for name in os.listdir(root):
+                if os.path.isfile(os.path.join(root, name, ".git")):
+                    subs.add(name)
+        except OSError:
+            pass                      # unreadable root: report nothing skipped, let the scan try
+        _cache[key] = subs
+    if not subs:
+        return False
+    return rel.split("/", 1)[0] in subs
+
+
 def tracked_files(root):
     """Every git-tracked path. Raises GitError if git cannot enumerate them (see _run).
 
@@ -1422,7 +1450,7 @@ def scan_tree(root, allow, pol, files=None, stats=None):
         if not rel:
             continue
         counts["enumerated"] += 1
-        if any(part in SKIP_DIR for part in rel.split("/")):
+        if any(part in SKIP_DIR for part in rel.split("/")) or _in_submodule(root, rel):
             counts["skipped_dir"] += 1
             continue
         if os.path.splitext(rel)[1].lower() in BINARY_EXT:
