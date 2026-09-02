@@ -19,7 +19,9 @@ Nine detection rules, implemented as 38 regexes across five tools. What they act
 | DENYLIST | hand-listed private terms no structural rule can infer |
 
 Plus 13 filename patterns that recognise real-run output, four false-positive suppressors, and
-twelve pure text helpers (dash style, document budget) that carry no security role at all.
+twelve pure text helpers that carry no security role at all. The two gates that were purely
+style and architecture, dash_guard and load_budget, now live in fleet-style: they were 17.5% of
+this repo and none of it was about keeping an identifier out of a public history.
 
 ## Why this repo exists
 
