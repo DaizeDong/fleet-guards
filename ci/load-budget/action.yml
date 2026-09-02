@@ -1,0 +1,15 @@
+name: load-budget
+description: PHILOSOPHY P7 always-loaded budget and the no-second-copy rule, against the CALLING repo.
+
+# WHY THIS RUNS AT ALL. load_budget.py was vendored into 18 repos and wired into nothing: no push,
+# no hook, no schedule. A control that executes nowhere is not a weak control, it is the absence of
+# one wearing the costume of a control -- a reader greps the repo, sees a P7 gate sitting next to
+# the guards that do run, and reasonably concludes P7 is enforced. Either it runs or it stops being
+# carried. This is it running.
+
+runs:
+  using: composite
+  steps:
+    - name: Always-loaded budget (P7)
+      shell: bash
+      run: python "$GITHUB_ACTION_PATH/../../tools/load_budget.py" .
