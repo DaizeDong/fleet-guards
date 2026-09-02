@@ -1,0 +1,7 @@
+# Running the guards from inside a consuming repo leaves bytecode here, and because this repo is a
+# SUBMODULE that turns into a permanent `M guards` in the consumer's git status. A status line that
+# is always dirty is a status line nobody reads, so ignore the artifacts at the source rather than
+# asking every consumer to.
+__pycache__/
+*.pyc
+.pytest_cache/
