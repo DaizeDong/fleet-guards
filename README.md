@@ -34,8 +34,13 @@ A submodule replaces the list with a pointer that lives in the consuming repo it
 
 ## How to consume it
 
-    git submodule add -b main <url> guards
+    git submodule add -b main https://github.com/DaizeDong/fleet-guards.git guards
     git config core.hooksPath guards/hooks
+
+USE THE HTTPS URL, not an ssh host alias. `.gitmodules` is committed and shared, so the url has to
+resolve for everyone who clones, including a CI runner. The first migration used a local ssh alias
+and all three workflows failed immediately with "Could not read from remote repository". This is
+also why this repo must stay public: a private submodule breaks CI in every public consumer.
 
 Clone with `--recursive`, or run `git submodule update --init` afterwards. CI must set
 `submodules: true` on actions/checkout.
