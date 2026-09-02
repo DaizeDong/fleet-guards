@@ -85,15 +85,38 @@ def _config_env_vars(skill):
 
 
 def _own_repo_root():
-    """The git worktree containing THIS file, or None.
+    """The git worktree whose data this module is protecting, or None.
 
     Walks parents looking for `.git`. Deliberately does not shell out: this runs inside live skills
     on machines where git may be absent, and a probe that can fail open is not a check.
+
+    A `.git` FILE rather than a directory means this file is inside a SUBMODULE, and the walk keeps
+    going to the superproject. That distinction is the whole correctness of this function once the
+    guard kit is consumed as a submodule, and getting it wrong is silent and dangerous:
+
+      With the kit vendored at <repo>/tools/, "own repo" was <repo>, the sibling convention looked
+      beside <repo>, and _reject_if_inside_own_repo refused any answer inside <repo>.
+
+      Consumed at <repo>/guards/tools/, the naive walk stopped at <repo>/guards. Every convention
+      candidate then pointed at <repo>/<skill>-config, which is INSIDE THE PUBLIC REPO, and the
+      rejection compared against <repo>/guards, so it did not fire. Measured 2026-09-01 on the
+      first migrated consumer: the real sibling companion became unreachable and the resolver was
+      one mkdir away from nominating a path inside a public repo as the place real output lives.
+      Nothing errored. resolve_companion_root simply answered None, which reads exactly like a
+      machine that has no companion set up yet.
+
+    So the submodule case is detected by SHAPE, not by name: `.git` as a file is git's own marker
+    for "this worktree belongs to a parent", and it is the only reliable signal available without
+    shelling out.
     """
     d = os.path.dirname(os.path.abspath(__file__))
     while True:
-        if os.path.exists(os.path.join(d, ".git")):
+        g = os.path.join(d, ".git")
+        if os.path.isdir(g):
             return d
+        if os.path.isfile(g):
+            # Submodule boundary: keep walking to the superproject.
+            pass
         parent = os.path.dirname(d)
         if parent == d:
             return None

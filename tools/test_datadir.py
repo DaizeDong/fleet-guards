@@ -195,3 +195,49 @@ def test_no_worktree_means_no_refusal(monkeypatch, tmp_path):
     store.mkdir()
     monkeypatch.setenv("LOOSE_DATA_DIR", str(store))
     assert str(mod.resolve_data_dir("loose")) == str(store)
+
+
+# --------------------------------------------------------------------- submodule boundary (2026-09-01)
+def test_own_repo_root_walks_past_a_submodule_to_the_superproject(tmp_path, monkeypatch):
+    """The kit is consumed as a submodule at <repo>/guards, and a submodule's .git is a FILE.
+
+    A walk that stops at the first .git of any kind stops at <repo>/guards. Everything downstream
+    then answers about the KIT instead of the repo it is protecting: the sibling convention looks
+    beside guards/, which is inside the public repo, and _reject_if_inside_own_repo compares
+    against guards/ so it does not fire on a path inside that public repo.
+
+    This is the regression for that. It fails against the pre-2026-09-01 walk, which is the only
+    reason it is worth keeping: measured by reverting the isdir/isfile split and watching it go red.
+    """
+    superproject = tmp_path / "consumer"
+    (superproject / ".git").mkdir(parents=True)          # a real worktree: .git is a DIRECTORY
+    kit = superproject / "guards" / "tools"
+    kit.mkdir(parents=True)
+    (superproject / "guards" / ".git").write_text("gitdir: ../.git/modules/guards\n", encoding="utf-8")
+
+    module_file = kit / "datadir.py"
+    module_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(dd, "__file__", str(module_file))
+
+    assert dd._own_repo_root() == str(superproject), (
+        "the walk stopped inside the submodule, so every companion answer is now about the guard "
+        "kit rather than the repo whose data must stay out of it")
+
+
+def test_a_path_inside_the_superproject_is_still_rejected_when_running_from_a_submodule(tmp_path, monkeypatch):
+    """The consequence the walk fix exists to prevent, asserted at the rejection itself.
+
+    Own-repo rejection is the last thing standing between a resolver and a public repo. Getting the
+    root wrong does not disable it loudly; it just makes it compare against the wrong tree and pass.
+    """
+    superproject = tmp_path / "consumer"
+    (superproject / ".git").mkdir(parents=True)
+    kit = superproject / "guards" / "tools"
+    kit.mkdir(parents=True)
+    (superproject / "guards" / ".git").write_text("gitdir: ../.git/modules/guards\n", encoding="utf-8")
+    monkeypatch.setattr(dd, "__file__", str(kit / "datadir.py"))
+
+    inside = superproject / "myskill-config"
+    inside.mkdir()
+    with pytest.raises(Exception):
+        dd._reject_if_inside_own_repo(inside, "myskill")
