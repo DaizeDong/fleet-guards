@@ -468,3 +468,40 @@ def test_a_clean_report_states_how_much_was_examined(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------------------- submodules (2026-09-02)
+def test_a_submodule_is_skipped_by_shape_not_by_name(tmp_path):
+    """Any submodule is skipped, not just one this file happens to know the name of.
+
+    It was a hardcoded {"guards"} until a second kit was split out and every consumer grew a
+    `style/` directory. The scan could not read it, so every commit in every repo printed "1 item
+    was NOT examined, so this is not a clean bill of health" -- a rare and important line, made
+    routine, which is how people learn to scroll past it.
+
+    The fixture names the directory something no name list would ever contain, so a fix that just
+    adds "style" to the set does not pass this.
+    """
+    sub = tmp_path / "vendored-thing-nobody-listed"
+    sub.mkdir()
+    (sub / ".git").write_text("gitdir: ../.git/modules/x" + chr(92) + "n", encoding="utf-8")
+    assert g._in_submodule(str(tmp_path), "vendored-thing-nobody-listed/whatever.py")
+    assert not g._in_submodule(str(tmp_path), "src/whatever.py")
+
+
+def test_a_plain_directory_is_not_treated_as_a_submodule(tmp_path):
+    """The negative control. Skipping by shape must not start skipping ordinary directories: a
+    scanner that quietly stops reading real source is the failure this whole file exists to
+    prevent, and it would look identical to a clean run."""
+    plain = tmp_path / "src"
+    plain.mkdir()
+    (plain / "app.py").write_text("x = 1" + chr(92) + "n", encoding="utf-8")
+    assert not g._in_submodule(str(tmp_path), "src/app.py")
+
+
+def test_a_nested_git_DIRECTORY_is_not_a_submodule(tmp_path):
+    """A separate clone checked out inside a repo has .git as a DIRECTORY, and is not a submodule.
+    Treating it as one would silently drop it from the scan."""
+    inner = tmp_path / "someclone"
+    (inner / ".git").mkdir(parents=True)
+    assert not g._in_submodule(str(tmp_path), "someclone/file.py")
