@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "Skill Repo Spec v1 s9 -- every path in this repo belongs to exactly one class.",
+    "This repo is ALL TOOL: it ships the guard kit and nothing else. It holds no fixtures,",
+    "because it has no product to fixture, and it can never hold DATA, because nothing here",
+    "runs against a real target. The tests are TOOL too: they must contain the shapes the",
+    "guards detect, which is why pii_guard self-excludes them structurally while still",
+    "applying the private denylist to them."
+  ],
+  "data": [],
+  "data_sealed": [],
+  "fixture": []
+}
