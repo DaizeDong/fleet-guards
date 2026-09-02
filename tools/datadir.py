@@ -145,6 +145,23 @@ def _reject_if_inside_own_repo(p, skill):
             % (skill, target, repo, _config_env_vars(skill)[0], _env_var(skill)))
 
 
+
+def assert_outside_own_repo(p, skill):
+    """PUBLIC name for the own-repo rejection. Callers outside this module use THIS.
+
+    It is a one-line wrapper and it has now been deleted twice by refactors that saw a private
+    helper with a public duplicate and removed the duplicate. Both times the deletion was silent
+    here and loud somewhere else: daily-hotspots' three writers call it before every write, and
+    losing it produced 83 failures and 17 errors in a skill that runs daily, with a message
+    ("module has no attribute") that names the symbol and not the reason.
+
+    So it stays, and the test below is why: a refactor is free to rename the private helper, and
+    is not free to remove this name. It is the only thing standing between a writer and its own
+    public repo, and its entire value is that callers can reach it.
+    """
+    return _reject_if_inside_own_repo(p, skill)
+
+
 def _convention_roots(skill):
     """The fleet convention: a skill's companion repo is its SIBLING, named `<skill>-config`.
 

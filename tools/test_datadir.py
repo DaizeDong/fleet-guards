@@ -241,3 +241,25 @@ def test_a_path_inside_the_superproject_is_still_rejected_when_running_from_a_su
     inside.mkdir()
     with pytest.raises(Exception):
         dd._reject_if_inside_own_repo(inside, "myskill")
+
+
+def test_assert_outside_own_repo_is_reachable_by_its_public_name(tmp_path, monkeypatch):
+    """The public name exists and rejects, not merely exists.
+
+    Deleted twice by refactors tidying away what looked like a duplicate of the private helper.
+    Three writers in daily-hotspots call it before every write, so its absence is 100 failing
+    tests in a skill that runs every day, reported as "module has no attribute" -- a message that
+    names the symbol and not the consequence.
+
+    An existence check would not have caught the second loss either, because what matters is that
+    a path inside the repo still raises. So this asserts the behaviour through the public name.
+    """
+    assert callable(getattr(dd, "assert_outside_own_repo", None)), (
+        "the public name is gone again; three writers reach for it before every write")
+    repo = tmp_path / "toolrepo"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setattr(dd, "__file__", str(repo / "tools" / "datadir.py"))
+    inside = repo / "data"
+    inside.mkdir()
+    with pytest.raises(dd.DataDirInsideOwnRepo):
+        dd.assert_outside_own_repo(inside, "toolrepo")
