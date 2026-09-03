@@ -263,3 +263,118 @@ def test_assert_outside_own_repo_is_reachable_by_its_public_name(tmp_path, monke
     inside.mkdir()
     with pytest.raises(dd.DataDirInsideOwnRepo):
         dd.assert_outside_own_repo(inside, "toolrepo")
+
+
+# --- a CONVENTION-path candidate must prove it is the companion ----------------------------------
+# 2026-09-02. The resolver accepted any directory that merely EXISTED at a candidate path. That is
+# not theoretical: a directory was created at the convention path during unrelated work, the env
+# pointer was not in scope, and the resolver returned the empty decoy as both the companion root
+# and the data dir with no exception. Writes would have landed there while the real companion kept
+# being backed up as usual -- two stores for one skill.
+#
+# The failure DIRECTION is what makes it serious. "Uninitialised" is a safe answer: the caller says
+# so and stops. A confident wrong path is not, because nothing downstream can tell it from a right
+# one.
+#
+# The check is deliberately narrow. Only the CONVENTION path is proven, because only it is DERIVED
+# -- the sibling of whatever worktree this file sits in, a location unrelated work can come to
+# occupy. A `~/.<skill>-config` dotfile is somebody's deliberate mkdir and is treated as intent;
+# companions of that shape are not always git repos, so demanding proof there would break them
+# to fix a hole they are not in.
+
+def _fake_sibling_layout(monkeypatch, tmp_path):
+    """Put the module in a worktree so `_convention_roots` resolves to tmp_path/<skill>-config."""
+    repo = tmp_path / "myskill"
+    (repo / ".git").mkdir(parents=True)
+    kit = repo / "guards" / "tools"
+    kit.mkdir(parents=True)
+    (repo / "guards" / ".git").write_text("gitdir: ../.git/modules/guards\n", encoding="utf-8")
+    monkeypatch.setattr(dd, "__file__", str(kit / "datadir.py"))
+    return tmp_path / "demo-config"
+
+
+def test_bare_directory_at_convention_path_is_refused(monkeypatch, tmp_path):
+    """A directory with no proof of being the companion must RAISE, not be returned."""
+    _isolate_home(monkeypatch, tmp_path)
+    decoy = _fake_sibling_layout(monkeypatch, tmp_path)
+    decoy.mkdir()
+    with pytest.raises(dd.CompanionUnproven) as ei:
+        dd.resolve_data_dir("demo")
+    msg = str(ei.value)
+    # The message has to tell the operator what to do and WHICH directory, not merely that
+    # something was wrong. A refusal nobody can act on gets worked around, not fixed.
+    assert "demo" in msg and str(decoy) in msg
+
+
+def test_bare_directory_also_refused_for_companion_root(monkeypatch, tmp_path):
+    """Both entry points, because callers use both and a hole in either is the whole hole."""
+    _isolate_home(monkeypatch, tmp_path)
+    decoy = _fake_sibling_layout(monkeypatch, tmp_path)
+    decoy.mkdir()
+    with pytest.raises(dd.CompanionUnproven):
+        dd.resolve_companion_root("demo")
+
+
+def test_git_remote_proves_identity(monkeypatch, tmp_path):
+    """A git worktree whose origin ends in <skill>-config IS the companion. The collision itself
+    supplies the distinguishing fact, so this proof costs nothing to obtain."""
+    _isolate_home(monkeypatch, tmp_path)
+    comp = _fake_sibling_layout(monkeypatch, tmp_path)
+    (comp / ".git").mkdir(parents=True)
+    (comp / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = git@github.com:Someone/demo-config.git\n', encoding="utf-8")
+    assert str(dd.resolve_data_dir("demo")) == str(comp)
+
+
+def test_marker_file_proves_identity(monkeypatch, tmp_path):
+    """Not every companion is a git repo. An explicit marker is the other proof, and it is explicit
+    precisely so that an accident cannot produce one."""
+    _isolate_home(monkeypatch, tmp_path)
+    comp = _fake_sibling_layout(monkeypatch, tmp_path)
+    comp.mkdir()
+    (comp / ".companion").write_text("demo\n", encoding="utf-8")
+    assert str(dd.resolve_data_dir("demo")) == str(comp)
+
+
+def test_marker_naming_another_skill_is_not_proof(monkeypatch, tmp_path):
+    """A marker naming somebody else's skill is somebody else's companion."""
+    _isolate_home(monkeypatch, tmp_path)
+    comp = _fake_sibling_layout(monkeypatch, tmp_path)
+    comp.mkdir()
+    (comp / ".companion").write_text("something-else\n", encoding="utf-8")
+    with pytest.raises(dd.CompanionUnproven):
+        dd.resolve_data_dir("demo")
+
+
+def test_a_proven_companion_later_in_the_order_beats_a_stray_earlier(monkeypatch, tmp_path):
+    """The stray is SKIPPED, not fatal, so a working setup keeps working.
+
+    Raising on the first unproven directory would have been the simpler rule and the wrong one: a
+    stray at the convention path would then break a skill whose real companion is its dotfile, and
+    a gate that breaks working setups gets disabled rather than satisfied.
+    """
+    home = _isolate_home(monkeypatch, tmp_path)
+    stray = _fake_sibling_layout(monkeypatch, tmp_path)
+    stray.mkdir()
+    real = home / ".demo-config"
+    real.mkdir()
+    assert str(dd.resolve_data_dir("demo")) == str(real)
+
+
+def test_dotfile_needs_no_proof(monkeypatch, tmp_path):
+    """A companion of this shape need not be a git repo, so demanding proof here would break it
+    to close a hole it is not in."""
+    home = _isolate_home(monkeypatch, tmp_path)
+    _fake_sibling_layout(monkeypatch, tmp_path)   # convention path exists as a concept, not on disk
+    d = home / ".demo-config"
+    d.mkdir()
+    assert str(dd.resolve_data_dir("demo")) == str(d)
+
+
+def test_explicit_env_override_needs_no_proof(monkeypatch, tmp_path):
+    """Someone who types a path has already supplied the intent the proof stands in for."""
+    _isolate_home(monkeypatch, tmp_path)
+    store = tmp_path / "explicit"
+    store.mkdir()
+    monkeypatch.setenv("DEMO_DATA_DIR", str(store))
+    assert str(dd.resolve_data_dir("demo")) == str(store)
