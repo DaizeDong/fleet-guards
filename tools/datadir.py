@@ -190,12 +190,120 @@ def _convention_roots(skill):
     return [Path(root).parent / ("%s-config" % skill)]
 
 
+_MARKER = ".companion"
+
+
+class CompanionUnproven(RuntimeError):
+    """A directory sits at a candidate path but carries no proof of being the companion."""
+
+
+def _remote_url(path):
+    """The origin URL from a worktree's .git/config, or None.
+
+    Read as text rather than shelled out to git. This runs inside pre-commit hooks across the
+    consuming repo, and a subprocess per candidate is a cost paid on every commit. A submodule's
+    FILE holding a gitdir: pointer, so that one indirection is followed.
+    """
+    g = path / ".git"
+    cfg = None
+    if g.is_dir():
+        cfg = g / "config"
+    elif g.is_file():
+        try:
+            line = g.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if line.startswith("gitdir:"):
+            cfg = (path / line.split(":", 1)[1].strip()).resolve() / "config"
+    if cfg is None or not cfg.is_file():
+        return None
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    in_origin = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("["):
+            in_origin = s.replace(" ", "").replace('"', "").lower() == "[remoteorigin]"
+            continue
+        if in_origin and s.lower().startswith("url") and "=" in s:
+            return s.split("=", 1)[1].strip()
+    return None
+
+
+def _proves_companion(path, skill):
+    """Does this directory carry PROOF that it is `skill`'s companion?
+
+    2026-09-02. Before this, the only test was is_dir(), so ANY directory sitting at a candidate
+    path won. That is not theoretical. A directory was created at the convention path during
+    unrelated work, the env pointer was out of scope, and the resolver returned the empty decoy as
+    both the companion root and the data dir, without raising. Writes would have landed in a
+    directory nothing backs up, while the real companion kept being backed up as usual: two stores
+    for one skill.
+
+    The failure DIRECTION is what makes it worth code. "Uninitialised" is a safe answer, because
+    the caller says so and stops. A confident wrong path is not, because nothing downstream can
+    tell it from a right one.
+
+    Two proofs, either sufficient:
+      * the git remote. A companion's origin ends in <skill>-config; a decoy has no remote at all.
+        This costs nothing extra: the collision itself supplies the distinguishing fact.
+      * an explicit .companion marker naming the skill, for a companion that is not a git repo
+        yet. Explicit precisely so that an accident cannot produce one.
+    """
+    marker = path / _MARKER
+    if marker.is_file():
+        try:
+            for line in marker.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.strip():
+                    return line.strip() == skill
+        except OSError:
+            return False
+        return False
+    url = _remote_url(path)
+    if not url:
+        return False
+    base = url.rstrip("/").rsplit("/", 1)[-1]
+    if base.endswith(".git"):
+        base = base[:-4]
+    if ":" in base:
+        base = base.rsplit(":", 1)[-1]
+    return base == ("%s-config" % skill)
+
+
+def _unproven_error(skill, dirs):
+    return CompanionUnproven(
+        "%s: found %d director%s at the companion path(s) below, and NONE of them carries proof\n"
+        "of being %s's companion. Refusing to return one, because guessing here is how a skill\n"
+        "ends up writing real-run output to a directory that nothing backs up or pushes.\n"
+        "%s\n"
+        "Fix it in whichever way is true:\n"
+        "    * if one of them IS the companion, give it its remote, or write its name into a\n"
+        "      %s file inside it (one line, exactly: %s)\n"
+        "    * if none of them is, delete the stray directory\n"
+        "    * or point %s at the real companion explicitly"
+        % (skill, len(dirs), "y" if len(dirs) == 1 else "ies", skill,
+           "\n".join("      %s" % d for d in dirs), _MARKER, skill, _config_env_vars(skill)[0]))
+
+
 def _candidates(skill):
-    """Discovery order, as Paths. See the module docstring."""
+    """Discovery order, as (Path, explicit) pairs. See the module docstring.
+
+    `explicit` marks a path that carries the operator's INTENT on its face: an environment
+    variable they set, or a hidden directory named exactly `.<skill>-config`, which nothing
+    creates by accident. Those are taken on
+    trust: someone who types a path has already supplied the intent that the proof below stands in
+    for, and demanding a marker there would break every deliberate override for no safety gain.
+    The CONVENTION path is different in kind and that is why it alone is checked. This module
+    DERIVES it -- the sibling of whatever worktree the file happens to sit in -- so an
+    unrelated directory can come to occupy it, which is exactly what happened on 2026-09-02.
+    A guess has to be proven; a path someone typed does not.
+    """
     out = []
     d = os.environ.get(_env_var(skill))
     if d:
-        out.append(Path(os.path.expanduser(d)))
+        out.append((Path(os.path.expanduser(d)), True))
     for ev in _config_env_vars(skill):
         c = os.environ.get(ev)
         if not c:
@@ -205,23 +313,23 @@ def _candidates(skill):
         # at the repo root (daily-hotspots' archive/ is the fleet's other shape) gets the root.
         # Either way the ANSWER to "where does real-run output live" is inside that private repo,
         # which is what every consumer of this function is actually asking.
-        out.append(root / "data")
-        out.append(root)
+        out.append((root / "data", True))
+        out.append((root, True))
     # The convention comes BEFORE the dotfiles: when a skill has a real companion repo beside it,
     # that repo is the answer, and a leftover dotfile must not shadow it. It comes AFTER the env
     # vars so an explicit override still wins.
     for root in _convention_roots(skill):
-        out.append(root / "data")
-        out.append(root)
+        out.append((root / "data", False))
+        out.append((root, False))
     dot = Path(os.path.expanduser("~/.%s-config" % skill))
-    out.append(dot / "data")
+    out.append((dot / "data", True))
     # The dotfile ROOT, not just its data/ subdir. Companion repos are already probed both ways
     # a few lines up; the dotfile shape was only probed one way, so a skill that files output
     # directly at the root answered "uninitialized" while its files sat right there. email-monitor
     # is that shape (153 tracked files, its own private remote, and its CONFIG.md documents this
     # exact path as the third discovery step) and it read as having no data at all until 2026-08-20.
-    out.append(dot)
-    out.append(Path(os.path.expanduser("~/.%s-data" % skill)))
+    out.append((dot, True))
+    out.append((Path(os.path.expanduser("~/.%s-data" % skill)), True))
     return out
 
 
@@ -243,32 +351,57 @@ def resolve_companion_root(skill):
     So a caller that needs the companion asks here rather than re-deriving the order. The order is
     the same as resolve_data_dir's, minus the data/ suffix probes, and the same rejection applies: a
     companion that resolves inside the skill's own repo raises rather than being returned.
+
+    An unproven directory is SKIPPED rather than raised on immediately, so a real companion later
+    in the order still wins over a stray directory earlier in it. Only when the whole order is
+    exhausted with nothing proven does the stray become an error -- at which point staying silent
+    would mean answering "uninitialised" while a directory the operator can see sits right there.
     """
-    for p in _candidates(skill):
+    unproven = []
+    for p, explicit in _candidates(skill):
         if not p.is_dir():
             continue
         # _candidates yields <root>/data before <root>. A caller asking for the companion ROOT gets
         # the parent in that case, so both companion shapes in this fleet answer the same way.
         root = p.parent if p.name == "data" and p.parent.is_dir() else p
+        if not explicit and not _proves_companion(root, skill):
+            if root not in unproven:
+                unproven.append(root)
+            continue
         _reject_if_inside_own_repo(root, skill)
         return root
+    if unproven:
+        raise _unproven_error(skill, unproven)
     return None
 
 
 def resolve_data_dir(skill, create=False):
     """Return the private data dir for `skill`, or None if the tool is uninitialized.
 
-    Raises DataDirInsideOwnRepo if the resolved directory sits inside this skill's own repo.
+    Raises DataDirInsideOwnRepo if the resolved directory sits inside this skill's own repo, and
+    CompanionUnproven if the only thing found was a directory that cannot show it is the companion.
     """
     candidates = _candidates(skill)
-    for p in candidates:
-        if p.is_dir():
-            _reject_if_inside_own_repo(p, skill)
-            return p
+    unproven = []
+    for p, explicit in candidates:
+        if not p.is_dir():
+            continue
+        if not explicit:
+            # The proof lives on the companion ROOT, not on its data/ subdir, so a <root>/data
+            # candidate is judged by its parent.
+            root = p.parent if p.name == "data" and p.parent.is_dir() else p
+            if not _proves_companion(root, skill):
+                if root not in unproven:
+                    unproven.append(root)
+                continue
+        _reject_if_inside_own_repo(p, skill)
+        return p
+    if unproven:
+        raise _unproven_error(skill, unproven)
     if create:
         # Create the most specific place the operator actually pointed at: an explicit data-dir
         # override first, then the companion repo's data/, then the dotfile default.
-        p = candidates[0]
+        p = candidates[0][0]
         _reject_if_inside_own_repo(p, skill)
         p.mkdir(parents=True, exist_ok=True)
         return p
