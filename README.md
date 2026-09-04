@@ -63,3 +63,32 @@ A plain `git clone` without `--recursive` leaves `guards/` EMPTY. So does a CI c
 a commit loudly rather than passing in silence, which is the only reason this arrangement is safe.
 If you ever see the guards directory empty, the answer is `git submodule update --init`, never
 `--no-verify`.
+
+## Adding things to a repo that consumes this
+
+Measured on a real consumer, not reasoned about. Four things behave differently once a submodule
+is in the tree, and only one of them will actually stop you.
+
+**The pre-commit framework will refuse to install.** `pre-commit install` prints "Cowardly refusing
+to install hooks with `core.hooksPath` set" and hints that you unset it. Following that hint leaves
+you with a working formatter and no gate. The stub in `.githooks/` calls `pre-commit run` itself
+when a config and the binary are both present, so both run and the guard stays last: a formatter
+that rewrites files cannot slip the change past the scan. Nothing to configure.
+
+**A linter walks in here.** This kit is clean under ruff's default rules, so `ruff check .` in a
+consumer reports nothing from it. Under an opinionated set it is not, and cannot be: 155 of the
+findings at that level are "rewrite %-formatting as f-strings" across a scanner where that churn
+buys no correctness. If you turn those on, exclude the submodules:
+
+    [tool.ruff]
+    extend-exclude = ["guards", "style"]
+
+**A module of yours with the same name as one here wins.** Verified: with the repo's own directory
+first on `sys.path`, `import datadir` resolves to the repo's, not the kit's. A `conftest.py` at the
+repo root also wins over the one here. The reverse only happens if you put the kit's path first,
+which is a choice, not a default.
+
+**Everything else was checked and is a non-event.** A new top-level package and its tests are
+collected normally; `find_packages()` returns nothing from the submodules; `pytest` at the root
+does not pick up the kit's suite (`pytest guards/tools/` still does, deliberately); a `pytest.ini`
+with `testpaths` changes nothing here; and the submodules never show as dirty after a test run.
