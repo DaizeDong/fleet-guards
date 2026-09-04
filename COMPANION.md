@@ -78,6 +78,21 @@ That is the entire requirement. Three things.
   two has already produced one wrong verdict in this fleet.
 - It sits **beside this repository, not inside it**, and is named `<skill>-config`. Anywhere else
   works only if you also set an environment variable, which is the failure mode above.
+- It must **prove it is the companion**, and a directory that merely sits at the right path does
+  not qualify. `is_dir()` was the whole test once, so anything created at a candidate path won:
+  a scratch directory made during unrelated work, an empty folder left by a failed run, a
+  same-named directory belonging to something else. The resolver would hand it back and a skill
+  would write real output into it. Either proof is sufficient and most companions already have the
+  first without doing anything:
+
+  - **a git remote whose URL ends in `<skill>-config`.** A real companion has one; a stray
+    directory has no remote at all.
+  - **a `.companion` file whose first line is the skill's name.** For a companion that is not a
+    git repository, or whose remote is named differently for a reason.
+
+  With neither, the resolver RAISES `CompanionUnproven` rather than returning a guess. That is the
+  same choice made everywhere else here: an answer nobody can justify is worse than no answer,
+  because only one of the two gets investigated.
 - Real output is **tracked or ignored, never loose**. Output that is neither is in a limbo where
   nothing backs it up and where `git status` is buried under so much noise that a genuinely new
   file cannot be seen. Measured on one companion: 35 loose run trees, 1640 files, 1.5 GB, against

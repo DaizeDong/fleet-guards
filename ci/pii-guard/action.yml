@@ -78,6 +78,21 @@ runs:
           echo "::error::.dataclass.json is MISSING from this repo -- data_boundary would exit 0 on every run"; exit 1; }
         python "$GITHUB_ACTION_PATH/../../tools/data_boundary.py"
 
+    # The companion contract, checked against the resolver by construction.
+    #
+    # It ran NOWHERE until 2026-09-04. It is a script, not a pytest module, so `pytest tools/`
+    # collected nothing from it and every job that looked like it covered the kit skipped it in
+    # silence. It was failing at the time it was found, because a change to the resolver had made
+    # the document stale -- which is precisely the drift it exists to catch, sitting undetected
+    # because nothing invoked the detector.
+    #
+    # Run by path, and its exit code is the step's. Not piped into anything: a pipe would hand this
+    # step the exit status of the last command in it, which is the defect that let a guard print
+    # findings while the commit sailed through.
+    - name: Companion contract (does the document still describe the resolver?)
+      shell: bash
+      run: python "$GITHUB_ACTION_PATH/../../tools/test_companion_contract.py"
+
     - name: Scan working tree + full history
       shell: bash
       run: python "$GITHUB_ACTION_PATH/../../tools/pii_guard.py" --tree --history
