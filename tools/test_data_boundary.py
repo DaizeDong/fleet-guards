@@ -321,6 +321,50 @@ def test_check1_over_rejection_untracked_data_path_passes(tmp_path):
     assert rc == CLEAN, "an unstaged DATA file is not a leak:\n%s" % out
 
 
+def test_summary_does_not_claim_absent_when_the_file_is_on_disk(tmp_path):
+    """The success line used to say "N DATA paths absent" without ever stating the filesystem.
+
+    Measured 2026-09-04: files sat on disk at declared DATA paths in several
+    repos, and each of them printed that those paths were absent. The rule itself is right (the INDEX is
+    what publishes), so the file's presence is NOT a violation and the test above pins that.
+    This pins the other half: the sentence must not assert something the run never checked.
+    """
+    m = base_manifest(data=["archive/opportunities.jsonl"])
+    repo = make_repo(tmp_path, files={"archive/opportunities.jsonl.example": '{"id": "..."}\n'},
+                     manifest=m)
+    (repo / "archive" / "opportunities.jsonl").write_text('{"id": "op-a"}\n', encoding="utf-8")
+    rc, out = run_guard(repo)
+    assert rc == CLEAN, out
+    assert "absent" not in out, (
+        "the file is on disk; claiming the path is absent is worse than saying nothing, "
+        "because the reader stops looking:\n%s" % out)
+    assert "present in the worktree" in out, (
+        "a present DATA file must be counted in the summary, or the number nobody sees is "
+        "the number nobody acts on:\n%s" % out)
+
+
+def test_summary_says_when_a_present_data_file_is_not_ignored(tmp_path):
+    """Present-and-ignored and present-and-unignored are different distances from publication.
+
+    Neither is a violation -- the commit-time index check is what stops publication -- but one of
+    them is a single `git add .` away from being staged, and collapsing the two into one number
+    hides exactly the case worth glancing at.
+    """
+    m = base_manifest(data=["archive/opportunities.jsonl"])
+    repo = make_repo(tmp_path, files={"archive/opportunities.jsonl.example": '{"id": "..."}\n'},
+                     manifest=m)
+    (repo / "archive" / "opportunities.jsonl").write_text('{"id": "op-a"}\n', encoding="utf-8")
+    rc, out = run_guard(repo)
+    assert rc == CLEAN, out
+    assert "NOT ignored" in out, "no .gitignore covers it, so the summary must say so:\n%s" % out
+
+    (repo / ".gitignore").write_text("archive/*.jsonl\n", encoding="utf-8")
+    rc2, out2 = run_guard(repo)
+    assert rc2 == CLEAN, out2
+    assert "NOT ignored" not in out2, "now it is ignored; the sentence must follow:\n%s" % out2
+    assert "present in the worktree but ignored" in out2, out2
+
+
 # ---------------------------------------------------------------------------------------------
 # CHECK 3 -- every DATA path ships a schema, so the uninitialized tool is still usable.
 # ---------------------------------------------------------------------------------------------

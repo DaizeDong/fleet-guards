@@ -264,6 +264,50 @@ def check_data_not_tracked(root, m, files, out):
                         "real-run output must live in the private companion config, not here"))
 
 
+def check_data_absent_from_worktree(root, m):
+    """Are the declared DATA paths actually ABSENT, or merely untracked?
+
+    check_data_not_tracked reads the INDEX, and that is the right rule: a DATA file sitting
+    unstaged in an operator's work tree is the NORMAL state while a skill runs, and `git add .`
+    followed by a commit is already stopped by that check at the moment it would matter. Making
+    presence itself a violation is over-rejection, and there is a test named for it.
+
+    What was wrong was not the rule, it was the SENTENCE. Nothing here ever looked at the
+    filesystem, and the success line said "%d DATA + %d sealed paths absent". Measured 2026-09-04: files existed
+    on disk at declared DATA paths in several repos, every one of which printed that those
+    paths were absent.
+
+    A gate that says nothing about a file leaves the reader with no belief. A gate that positively
+    asserts the file is not there leaves them with a WRONG one, and they do not go and look. So
+    this counts, and the summary says the number.
+
+    Returns (present, present_and_not_ignored). The second is not a violation; it is the subset one
+    `git add .` away from being staged, which is worth seeing in the sentence rather than inferring.
+    """
+    pats = list(m.get("data", [])) + list(m.get("data_sealed", []))
+    if not pats:
+        return (0, 0)
+    import fnmatch
+    present = unignored = 0
+    skip = {".git", "guards", "style", "node_modules", "__pycache__", ".venv", "venv"}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fn in filenames:
+            rel = os.path.relpath(os.path.join(dirpath, fn), root).replace(os.sep, "/")
+            if not any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(rel, p.rstrip("/") + "/*")
+                       for p in pats):
+                continue
+            present += 1
+            try:
+                # check-ignore exits 0 when the path IS ignored.
+                if subprocess.run(["git", "-C", root, "check-ignore", "-q", rel],
+                                  capture_output=True).returncode != 0:
+                    unignored += 1
+            except OSError:
+                unignored += 1
+    return (present, unignored)
+
+
 def check_data_has_schema(root, m, out):
     """An uninitialized tool must still be USABLE: ship the shape, never the contents.
 
@@ -691,6 +735,7 @@ def main():
 
     out = []
     check_data_not_tracked(root, m, files, out)
+    data_on_disk, data_unignored = check_data_absent_from_worktree(root, m)
     check_data_has_schema(root, m, out)
     check_fixtures_are_generated(root, m, out)
     check_no_undeclared_run_shapes(root, m, files, out)
@@ -737,9 +782,16 @@ def main():
               file=sys.stderr)
 
     if not out:
-        print("data_boundary: clean (%d DATA + %d sealed paths absent, %d FIXTUREs "
+        if not data_on_disk:
+            _disk = ""
+        elif data_unignored:
+            _disk = (", %d present in the worktree (%d of them NOT ignored)"
+                     % (data_on_disk, data_unignored))
+        else:
+            _disk = ", %d present in the worktree but ignored" % data_on_disk
+        print("data_boundary: clean (%d DATA + %d sealed paths not tracked%s, %d FIXTUREs "
               "generator-reproducible, %d tracked files carry no real-run shape)"
-              % (len(m.get("data", [])), len(m.get("data_sealed", [])),
+              % (len(m.get("data", [])), len(m.get("data_sealed", [])), _disk,
                  len(m.get("fixture", [])), len(files)))
         return 0
 
