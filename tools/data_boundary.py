@@ -387,10 +387,21 @@ def _resolve_companion(start):
         target = _repo_root(start)
     except GitError:
         target = start
-    dd_path = os.path.join(target, "tools", "datadir.py")
-    if not os.path.isfile(dd_path):
-        dd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datadir.py")
-    if not os.path.isfile(dd_path):
+    # LOOKUP ORDER, and why the first entry exists. The kit became a submodule on 2026-09-01,
+    # so a consumer's resolver moved from tools/ to guards/tools/. This list still asked only
+    # for tools/datadir.py, missed, and fell through to the copy beside THIS file. Inside a
+    # consumer that fallback happens to be the same submodule copy, so nothing looked wrong;
+    # run from a checkout OUTSIDE the repo under audit it loads that other copy instead, and a
+    # stale resolver is the one component whose wrongness is invisible -- it returns a path, and
+    # every caller believes it.
+    dd_path = None
+    for cand in (os.path.join(target, "guards", "tools", "datadir.py"),
+                 os.path.join(target, "tools", "datadir.py"),
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "datadir.py")):
+        if os.path.isfile(cand):
+            dd_path = cand
+            break
+    if dd_path is None:
         return None
     spec = importlib.util.spec_from_file_location("_data_boundary_datadir", dd_path)
     mod = importlib.util.module_from_spec(spec)
