@@ -58,6 +58,26 @@ def _clean_env(home):
     os.environ["USERPROFILE"] = home
 
 
+
+def _companion(root, name="", proven=True):
+    """Create a companion directory at `root`, with the proof the contract requires.
+
+    The fixtures used to call makedirs and stop there, which was enough while `is_dir()` was the
+    whole test. Once the resolver started demanding proof, three cases went red for a reason of
+    their own making: they built a directory that could not have been the companion and then
+    complained the resolver would not return it.
+
+    Writing the marker HERE, in the one place the fixtures share, also means these tests exercise
+    the documented proof rather than describing it. `proven=False` builds the decoy the resolver is
+    supposed to refuse.
+    """
+    os.makedirs(root, exist_ok=True)
+    if proven:
+        with io.open(os.path.join(root, ".companion"), "w", encoding="utf-8") as fh:
+            fh.write((name or SKILL) + chr(10))
+    return root
+
+
 def _case(make, envf=None, tmp=None):
     """Put a copy of datadir.py in <tmp>/repos/<skill>/tools/, run `make`, resolve.
 
@@ -111,11 +131,11 @@ def main():
          lambda t: {STEM + "_CONFIG": os.path.join(t, "cfg")},
          lambda t, r: os.path.join(t, "cfg", "data")),
         ("sibling <skill>-config/data",
-         lambda t, h, r: os.makedirs(os.path.join(r, SKILL + "-config", "data"), exist_ok=True),
+         lambda t, h, r: os.makedirs(os.path.join(_companion(os.path.join(r, SKILL + "-config")), "data"), exist_ok=True),
          lambda t: {},
          lambda t, r: os.path.join(r, SKILL + "-config", "data")),
         ("sibling root, the shape with no data/",
-         lambda t, h, r: os.makedirs(os.path.join(r, SKILL + "-config"), exist_ok=True),
+         lambda t, h, r: _companion(os.path.join(r, SKILL + "-config")),
          lambda t: {},
          lambda t, r: os.path.join(r, SKILL + "-config")),
         ("home dotfile config/data",
@@ -142,9 +162,32 @@ def main():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    print("\nB2. the PROOF requirement, in the document and in the resolver")
+    # Added 2026-09-04 after both halves were poisoned and this file noticed neither: the proof
+    # rule was deleted from the document and every case still passed, then the resolver was made
+    # to accept anything and every case still passed. Every other case builds a PROVEN companion,
+    # so none of them can see the difference. A contract test that cannot tell whether the rule
+    # exists is describing its own fixtures, not the contract.
+    for needed in (".companion", "CompanionUnproven", "-config"):
+        check("the document names %s" % needed, needed in text)
+
+    # A decoy: right path, right name, no proof. The resolver must REFUSE it rather than hand back
+    # a directory nothing backs up, and refusing means raising, not returning None -- None reads as
+    # "no companion configured", an ordinary state, and the two must not share an answer.
+    raised = None
+    try:
+        got, tmp, home, repos = _case(
+            lambda t, h, r: _companion(os.path.join(r, SKILL + "-config"), proven=False), {})
+        shutil.rmtree(tmp, ignore_errors=True)
+    except Exception as e:            # noqa: BLE001 -- the type is the assertion below
+        raised, got = e, None
+    check("an unproven directory at the companion path is refused",
+          raised is not None and type(raised).__name__ == "CompanionUnproven",
+          "raised=%r returned=%r" % (raised, got))
+
     print("\nC. the documented PRIORITY, by shadowing")
     got, tmp, home, repos = _case(lambda t, h, r: (
-        os.makedirs(os.path.join(r, SKILL + "-config", "data"), exist_ok=True),
+        os.makedirs(os.path.join(_companion(os.path.join(r, SKILL + "-config")), "data"), exist_ok=True),
         os.makedirs(os.path.join(h, "." + SKILL + "-config", "data"), exist_ok=True)), {})
     try:
         check("the sibling beats the home dotfile",
