@@ -645,3 +645,39 @@ def test_clean_and_not_examined_do_not_share_an_exit_code(tmp_path):
              "not armed": run_guard(unarmed)[0]}
     assert len(set(codes.values())) == 3, "these three states must be distinguishable: %r" % codes
     assert codes["clean"] == CLEAN
+
+
+def test_resolver_lookup_prefers_the_submodule_over_a_copy_beside_this_file(tmp_path, monkeypatch):
+    """The kit became a submodule, so a consumer's resolver lives at guards/tools/datadir.py.
+
+    The lookup asked only for tools/datadir.py, missed, and fell through to whatever datadir.py sat
+    beside data_boundary.py. Inside a consumer those two are the same file, so nothing looked
+    wrong; run from a checkout OUTSIDE the repo under audit it silently loads that other copy.
+    A stale resolver is the one component whose wrongness is invisible: it returns a path, and
+    every caller believes it.
+
+    Poisoned rather than asserted. The two candidate files return different sentinel values, so
+    the test can only pass by loading the right one.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_db_under_test", GUARD)
+    db = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(db)
+
+    repo = tmp_path / "consumer"
+    (repo / "guards" / "tools").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    # The submodule copy: the one that must win.
+    (repo / "guards" / "tools" / "datadir.py").write_text(
+        "def resolve_companion_root(skill):\n    return 'FROM-SUBMODULE'\n", encoding="utf-8")
+    # A decoy beside the tool itself, standing in for a machine-level checkout's stale fork.
+    outside = tmp_path / "machine-level"
+    outside.mkdir()
+    (outside / "datadir.py").write_text(
+        "def resolve_companion_root(skill):\n    return 'FROM-STALE-FORK'\n", encoding="utf-8")
+    monkeypatch.setattr(db, "__file__", str(outside / "data_boundary.py"))
+    monkeypatch.setattr(db, "_repo_root", lambda start: str(repo))
+
+    got = db._resolve_companion(str(repo))
+    assert got == "FROM-SUBMODULE", (
+        "loaded the copy beside the tool instead of the repo's own submodule resolver: %r" % got)
