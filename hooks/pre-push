@@ -127,13 +127,37 @@ if [ -f "$SEM" ]; then
   semrc=0
   while read -r _lref lsha _rref rsha; do
     [ "$lsha" = "$z" ] && continue
+    sbase=""
     if [ "$rsha" = "$z" ] || ! git cat-file -e "${rsha}^{commit}" 2>/dev/null ||
        ! git merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
       srange="$lsha --not --remotes"
+      # NOT a fast-forward, and we can still see what the remote has: name it as a baseline so the
+      # gate judges what this push PUBLISHES rather than the whole branch. On a rewritten history
+      # every commit is a new object even where its text is byte for byte what the remote already
+      # serves, and there is no rev-range that says otherwise, so without this a rebase, an amend or
+      # a filter-repo re-judges years of prose that has been public all along.
+      #
+      # Measured 2026-09-10 on a repo rewritten to remove four tokens: 350463 characters judged and
+      # blocked, and the identical judgement run against the PRE-rewrite history already on the
+      # remote blocked the same way, on the same old prose. With the baseline the same push is 623
+      # characters, being exactly the lines that changed. The finding was true of the old prose and
+      # false of the push, and the message this hook prints on a block names --no-verify, so the
+      # shape was actively teaching the bypass.
+      #
+      # Subtraction cannot hide a leak: it only drops lines the baseline already had, and removing a
+      # line is not a disclosure. Verified with a negative control, a synthetic private line in a new
+      # commit, which survived the subtraction and blocked at 0.95.
+      if [ "$rsha" != "$z" ] && git cat-file -e "${rsha}^{commit}" 2>/dev/null; then
+        sbase="$rsha"
+      fi
     else
       srange="$rsha..$lsha"
     fi
-    so=$("$SEM" --repo "$ROOT" --range "$srange" 2>&1) || semrc=1
+    if [ -n "$sbase" ]; then
+      so=$("$SEM" --repo "$ROOT" --range "$srange" --baseline "$sbase" 2>&1) || semrc=1
+    else
+      so=$("$SEM" --repo "$ROOT" --range "$srange" 2>&1) || semrc=1
+    fi
     [ -n "$so" ] && printf '%s\n' "$so"
   done
   [ "$semrc" -ne 0 ] && exit 1
