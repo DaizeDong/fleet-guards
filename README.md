@@ -2,6 +2,9 @@
 
 The guard kit for this fleet, in one place, consumed as a git submodule.
 
+The shared Python package also provides credential detection, safe file publication
+and explicit consumer-root companion resolution. See [the package contract](PACKAGE.md).
+
 ## What is in here
 
 Nine detection rules, implemented as 38 regexes across five tools. What they actually block:

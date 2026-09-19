@@ -48,11 +48,14 @@ dd = load(DATADIR)
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
+def _clean_env(monkeypatch, tmp_path):
     for v in ("DEMO_DATA_DIR", "DEMO_CONFIG", "DEMO_CONFIG_DIR"):
         monkeypatch.delenv(v, raising=False)
-    # HOME is read for the dotfile fallbacks; point it somewhere empty so a real machine's
-    # ~/.demo-config cannot make a test pass or fail by accident.
+    # Use a synthetic tool root even when --basetemp is inside the kit's own
+    # worktree. Discovery tests may supply their own module location afterwards.
+    tool = tmp_path / "default-tool"
+    (tool / ".git").mkdir(parents=True)
+    monkeypatch.setattr(dd, "__file__", str(tool / "tools" / "datadir.py"))
     yield
 
 
@@ -191,6 +194,11 @@ def test_no_worktree_means_no_refusal(monkeypatch, tmp_path):
     loose.mkdir(parents=True)
     shutil.copy2(DATADIR, loose / "datadir.py")
     mod = load(str(loose / "datadir.py"), "dd_loose")
+    # Model absent repository markers rather than depending on the runner's
+    # temporary directory being outside every Git worktree.
+    isdir, isfile = os.path.isdir, os.path.isfile
+    monkeypatch.setattr(os.path, "isdir", lambda p: False if os.path.basename(p) == ".git" else isdir(p))
+    monkeypatch.setattr(os.path, "isfile", lambda p: False if os.path.basename(p) == ".git" else isfile(p))
     store = tmp_path / "loose" / "data"
     store.mkdir()
     monkeypatch.setenv("LOOSE_DATA_DIR", str(store))

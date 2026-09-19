@@ -84,15 +84,15 @@ def _config_env_vars(skill):
     return (stem + "_CONFIG", stem + "_CONFIG_DIR")
 
 
-def _own_repo_root():
+def _own_repo_root(consumer_root=None):
     """The git worktree whose data this module is protecting, or None.
 
     Walks parents looking for `.git`. Deliberately does not shell out: this runs inside live skills
     on machines where git may be absent, and a probe that can fail open is not a check.
 
-    A `.git` FILE rather than a directory means this file is inside a SUBMODULE, and the walk keeps
-    going to the superproject. That distinction is the whole correctness of this function once the
-    guard kit is consumed as a submodule, and getting it wrong is silent and dangerous:
+    An explicit consumer_root wins over the module location. A submodule's `.git` file points
+    into a modules directory, so the walk continues to the superproject. A linked worktree's
+    gitdir has a commondir file instead; that worktree is itself the consumer.
 
       With the kit vendored at <repo>/tools/, "own repo" was <repo>, the sibling convention looked
       beside <repo>, and _reject_if_inside_own_repo refused any answer inside <repo>.
@@ -105,26 +105,32 @@ def _own_repo_root():
       Nothing errored. resolve_companion_root simply answered None, which reads exactly like a
       machine that has no companion set up yet.
 
-    So the submodule case is detected by SHAPE, not by name: `.git` as a file is git's own marker
-    for "this worktree belongs to a parent", and it is the only reliable signal available without
-    shelling out.
+    The distinction uses Git metadata, never the name of the directory containing the kit.
     """
+    if consumer_root is not None:
+        root = Path(consumer_root)
+        if not root.is_absolute() or not root.is_dir():
+            raise ValueError("consumer_root must be an existing absolute directory")
+        return str(root.resolve())
     d = os.path.dirname(os.path.abspath(__file__))
     while True:
         g = os.path.join(d, ".git")
         if os.path.isdir(g):
             return d
         if os.path.isfile(g):
-            # Submodule boundary: keep walking to the superproject.
-            pass
+            gitdir = _git_dir(Path(d))
+            if gitdir is None:
+                raise ValueError("invalid gitdir marker")
+            if (gitdir / "commondir").is_file() or "modules" not in gitdir.parts:
+                return d
         parent = os.path.dirname(d)
         if parent == d:
             return None
         d = parent
 
 
-def _reject_if_inside_own_repo(p, skill):
-    root = _own_repo_root()
+def _reject_if_inside_own_repo(p, skill, consumer_root=None):
+    root = _own_repo_root(consumer_root)
     if root is None:
         return                       # not deployed from a worktree; nothing to be inside of
     try:
@@ -146,7 +152,7 @@ def _reject_if_inside_own_repo(p, skill):
 
 
 
-def assert_outside_own_repo(p, skill):
+def assert_outside_own_repo(p, skill, *, consumer_root=None):
     """PUBLIC name for the own-repo rejection. Callers outside this module use THIS.
 
     It is a one-line wrapper and it has now been deleted twice by refactors that saw a private
@@ -159,10 +165,10 @@ def assert_outside_own_repo(p, skill):
     is not free to remove this name. It is the only thing standing between a writer and its own
     public repo, and its entire value is that callers can reach it.
     """
-    return _reject_if_inside_own_repo(p, skill)
+    return _reject_if_inside_own_repo(p, skill, consumer_root)
 
 
-def _convention_roots(skill):
+def _convention_roots(skill, consumer_root=None):
     """The fleet convention: a skill's companion repo is its SIBLING, named `<skill>-config`.
 
     Every companion repo in this fleet already follows this. Nothing looked for it, and that
@@ -184,7 +190,7 @@ def _convention_roots(skill):
     under the scripts directory), there is no sibling to infer and this contributes nothing;
     resolution then falls back to the env vars and dotfiles as before.
     """
-    root = _own_repo_root()
+    root = _own_repo_root(consumer_root)
     if root is None:
         return []
     return [Path(root).parent / ("%s-config" % skill)]
@@ -197,6 +203,21 @@ class CompanionUnproven(RuntimeError):
     """A directory sits at a candidate path but carries no proof of being the companion."""
 
 
+def _git_dir(path):
+    """Resolve Git's directory pointer without invoking git or inspecting remotes."""
+    marker = path / ".git"
+    if marker.is_dir():
+        return marker
+    if marker.is_file():
+        try:
+            line = marker.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return None
+        if line.startswith("gitdir:") and line.split(":", 1)[1].strip():
+            return (path / line.split(":", 1)[1].strip()).resolve()
+    return None
+
+
 def _remote_url(path):
     """The origin URL from a worktree's .git/config, or None.
 
@@ -204,18 +225,20 @@ def _remote_url(path):
     consuming repo, and a subprocess per candidate is a cost paid on every commit. A submodule's
     FILE holding a gitdir: pointer, so that one indirection is followed.
     """
-    g = path / ".git"
-    cfg = None
-    if g.is_dir():
-        cfg = g / "config"
-    elif g.is_file():
+    gitdir = _git_dir(path)
+    if gitdir is None:
+        return None
+    common = gitdir / "commondir"
+    if common.is_file():
         try:
-            line = g.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
+            pointer = common.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
             return None
-        if line.startswith("gitdir:"):
-            cfg = (path / line.split(":", 1)[1].strip()).resolve() / "config"
-    if cfg is None or not cfg.is_file():
+        if not pointer:
+            return None
+        gitdir = (gitdir / pointer).resolve()
+    cfg = gitdir / "config"
+    if not cfg.is_file():
         return None
     try:
         text = cfg.read_text(encoding="utf-8", errors="replace")
@@ -287,7 +310,23 @@ def _unproven_error(skill, dirs):
            "\n".join("      %s" % d for d in dirs), _MARKER, skill, _config_env_vars(skill)[0]))
 
 
-def _candidates(skill):
+def _context_path(value, env, cwd):
+    if env is None and cwd is None:
+        return Path(os.path.expanduser(value))
+    if value == '~' or value.startswith(('~/', '~\\')):
+        home = (env.get('USERPROFILE') or
+                (env.get('HOMEDRIVE', '') + env.get('HOMEPATH', '') if env.get('HOMEPATH') else '') or
+                env.get('HOME')) if os.name == 'nt' else env.get('HOME')
+        if not home:
+            raise ValueError('home is unavailable in caller context')
+        value = str(Path(home) / value[2:]) if value != '~' else home
+    elif value.startswith('~'):
+        raise ValueError('named-user expansion is unavailable in caller context')
+    path = Path(value)
+    return path if path.is_absolute() else Path(cwd or os.getcwd()) / path
+
+
+def _candidates(skill, consumer_root=None, *, env=None, cwd=None):
     """Discovery order, as (Path, explicit) pairs. See the module docstring.
 
     `explicit` marks a path that carries the operator's INTENT on its face: an environment
@@ -301,14 +340,20 @@ def _candidates(skill):
     A guess has to be proven; a path someone typed does not.
     """
     out = []
-    d = os.environ.get(_env_var(skill))
+    explicit_context = env is not None or cwd is not None
+    environment = dict(os.environ if env is None else env)
+    if os.name == 'nt':
+        environment = {key.upper(): value for key, value in environment.items()}
+    context_env = environment if explicit_context else None
+    expand = lambda value: _context_path(value, context_env, cwd)
+    d = environment.get(_env_var(skill))
     if d:
-        out.append((Path(os.path.expanduser(d)), True))
+        out.append((expand(d), True))
     for ev in _config_env_vars(skill):
-        c = os.environ.get(ev)
+        c = environment.get(ev)
         if not c:
             continue
-        root = Path(os.path.expanduser(c))
+        root = expand(c)
         # A companion repo that keeps its output under data/ gets data/; one that files it directly
         # at the repo root (daily-hotspots' archive/ is the fleet's other shape) gets the root.
         # Either way the ANSWER to "where does real-run output live" is inside that private repo,
@@ -318,10 +363,14 @@ def _candidates(skill):
     # The convention comes BEFORE the dotfiles: when a skill has a real companion repo beside it,
     # that repo is the answer, and a leftover dotfile must not shadow it. It comes AFTER the env
     # vars so an explicit override still wins.
-    for root in _convention_roots(skill):
+    for root in _convention_roots(skill, consumer_root):
         out.append((root / "data", False))
         out.append((root, False))
-    dot = Path(os.path.expanduser("~/.%s-config" % skill))
+    try:
+        dot = expand("~/.%s-config" % skill)
+    except ValueError:
+        # An explicit context with no home must never borrow the host user's home.
+        return out
     out.append((dot / "data", True))
     # The dotfile ROOT, not just its data/ subdir. Companion repos are already probed both ways
     # a few lines up; the dotfile shape was only probed one way, so a skill that files output
@@ -329,11 +378,11 @@ def _candidates(skill):
     # is that shape (153 tracked files, its own private remote, and its CONFIG.md documents this
     # exact path as the third discovery step) and it read as having no data at all until 2026-08-20.
     out.append((dot, True))
-    out.append((Path(os.path.expanduser("~/.%s-data" % skill)), True))
+    out.append((expand("~/.%s-data" % skill), True))
     return out
 
 
-def resolve_companion_root(skill):
+def resolve_companion_root(skill, *, consumer_root=None, env=None, cwd=None):
     """The private companion REPO root for `skill`, or None. Never a path inside the skill's repo.
 
     resolve_data_dir answers "where does real-run output go", which is usually `<companion>/data`.
@@ -358,7 +407,7 @@ def resolve_companion_root(skill):
     would mean answering "uninitialised" while a directory the operator can see sits right there.
     """
     unproven = []
-    for p, explicit in _candidates(skill):
+    for p, explicit in _candidates(skill, consumer_root, env=env, cwd=cwd):
         if not p.is_dir():
             continue
         # _candidates yields <root>/data before <root>. A caller asking for the companion ROOT gets
@@ -368,20 +417,20 @@ def resolve_companion_root(skill):
             if root not in unproven:
                 unproven.append(root)
             continue
-        _reject_if_inside_own_repo(root, skill)
+        _reject_if_inside_own_repo(root, skill, consumer_root)
         return root
     if unproven:
         raise _unproven_error(skill, unproven)
     return None
 
 
-def resolve_data_dir(skill, create=False):
+def resolve_data_dir(skill, create=False, *, consumer_root=None, env=None, cwd=None):
     """Return the private data dir for `skill`, or None if the tool is uninitialized.
 
     Raises DataDirInsideOwnRepo if the resolved directory sits inside this skill's own repo, and
     CompanionUnproven if the only thing found was a directory that cannot show it is the companion.
     """
-    candidates = _candidates(skill)
+    candidates = _candidates(skill, consumer_root, env=env, cwd=cwd)
     unproven = []
     for p, explicit in candidates:
         if not p.is_dir():
@@ -394,23 +443,26 @@ def resolve_data_dir(skill, create=False):
                 if root not in unproven:
                     unproven.append(root)
                 continue
-        _reject_if_inside_own_repo(p, skill)
+        _reject_if_inside_own_repo(p, skill, consumer_root)
         return p
     if unproven:
         raise _unproven_error(skill, unproven)
-    if create:
+    if create and candidates:
         # Create the most specific place the operator actually pointed at: an explicit data-dir
         # override first, then the companion repo's data/, then the dotfile default.
         p = candidates[0][0]
-        _reject_if_inside_own_repo(p, skill)
+        _reject_if_inside_own_repo(p, skill, consumer_root)
         p.mkdir(parents=True, exist_ok=True)
         return p
     return None
 
 
-def data_path(skill, relpath, create=False):
+def data_path(skill, relpath, create=False, *, consumer_root=None, env=None, cwd=None):
     """Resolve <private data dir>/<relpath>. Never returns a path inside the repo."""
-    base = resolve_data_dir(skill, create=create)
+    relative = Path(relpath)
+    if relative.is_absolute() or relative.drive or ".." in relative.parts:
+        raise ValueError("relpath must stay within the private data directory")
+    base = resolve_data_dir(skill, create=create, consumer_root=consumer_root, env=env, cwd=cwd)
     if base is None:
         raise DataDirNotInitialized(
             "%s has no private data directory, so it has nowhere to put real-run output.\n"
@@ -422,7 +474,8 @@ def data_path(skill, relpath, create=False):
             "Real-run output NEVER goes back into THIS repo -- this repo carries only the schema\n"
             "(<file>.example) and a synthetic fixture set."
             % (skill, _config_env_vars(skill)[0], skill, _env_var(skill)))
-    p = base / relpath
+    p = base / relative
+    _reject_if_inside_own_repo(p, skill, consumer_root)
     if create:
         p.parent.mkdir(parents=True, exist_ok=True)
     return p
@@ -443,13 +496,14 @@ def _cli(argv=None):
     ap = argparse.ArgumentParser(description="Resolve a skill's private data path.")
     ap.add_argument("--path", action="store_true", help="print the resolved path")
     ap.add_argument("--create", action="store_true", help="create the directory if absent")
+    ap.add_argument("--consumer-root", help="explicit absolute tool repository root")
     ap.add_argument("skill")
     ap.add_argument("relpath", nargs="?", default="")
     a = ap.parse_args(argv)
 
     try:
-        p = data_path(a.skill, a.relpath, create=a.create) if a.relpath \
-            else (resolve_data_dir(a.skill, create=a.create) or _raise(a.skill))
+        p = data_path(a.skill, a.relpath, create=a.create, consumer_root=a.consumer_root) if a.relpath \
+            else (resolve_data_dir(a.skill, create=a.create, consumer_root=a.consumer_root) or _raise(a.skill))
     except DataDirNotInitialized as e:
         print(str(e), file=sys.stderr)
         return 3
