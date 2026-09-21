@@ -1,0 +1,35 @@
+name: Dispatch fleet consumers
+
+on:
+  workflow_call:
+    secrets:
+      targets:
+        required: true
+      credentials:
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DaizeDong/fleet-guards
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Notify subscribers after verifying the upstream commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          FLEET_SYNC_TARGETS: ${{ secrets.targets }}
+          FLEET_SYNC_CREDENTIALS: ${{ secrets.credentials }}
+        run: python tools/fleet_sync.py dispatch

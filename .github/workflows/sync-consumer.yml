@@ -1,0 +1,45 @@
+name: Synchronize fleet submodules
+
+on:
+  workflow_call:
+    secrets:
+      sync-token:
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require the enrolled consumer credential
+        env:
+          SYNC_TOKEN: ${{ secrets.sync-token }}
+        run: test -n "$SYNC_TOKEN"
+      - uses: actions/checkout@v4
+        with:
+          path: consumer
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          submodules: true
+          token: ${{ secrets.sync-token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: DaizeDong/fleet-guards
+          ref: main
+          path: fleet-sync-tool
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Advance verified gitlinks and run commit gates
+        working-directory: consumer
+        env:
+          GH_TOKEN: ${{ secrets.sync-token }}
+          SOURCE_REPOSITORY: ${{ github.event.client_payload.source_repository || 'all' }}
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha || '' }}
+          CONSUMER_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python ../fleet-sync-tool/tools/fleet_sync.py update

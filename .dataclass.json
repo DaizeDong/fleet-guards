@@ -24,6 +24,7 @@
     "no ledger, no runs tree, no dated output, no database.",
     "",
     "_run_shape_probes stays empty for the same reason and is the one honest answer here: a probe",
-    "list names what a real run of THIS repo writes, and a real run of this repo writes nothing."
+    "list names what a real run of THIS repo writes, and a real run of this repo writes nothing.",
+    "2026-09-21. tools/fleet_sync.py writes only selected consumer gitlinks and ephemeral runner Git configuration. It prints aggregate dispatch outcomes. Subscriber inventory and credentials are read from Actions secrets, never written into the public kit. Real enrollment and verification records belong in a private administration repository."
   ]
 }

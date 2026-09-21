@@ -37,7 +37,12 @@ A submodule replaces the list with a pointer that lives in the consuming repo it
 ## How to consume it
 
     git submodule add -b main https://github.com/DaizeDong/fleet-guards.git guards
-    git config core.hooksPath guards/hooks
+    git config core.hooksPath .githooks
+
+Commit fail-closed `.githooks/pre-commit` and `.githooks/pre-push` forwarding shims
+as part of installation. A shim must stop if `guards/hooks/<hook>` is missing,
+then execute that hook. Pointing Git directly at an empty submodule disables the
+gate silently; the committed shims are what detect an incomplete clone.
 
 USE THE HTTPS URL, not an ssh host alias. `.gitmodules` is committed and shared, so the url has to
 resolve for everyone who clones, including a CI runner. The first migration used a local ssh alias
@@ -52,9 +57,10 @@ Clone with `--recursive`, or run `git submodule update --init` afterwards. CI mu
     git submodule update --remote guards
     git add guards && git commit -m "guards: bump"
 
-A submodule pins one commit and does not follow the source on its own. That is deliberate: the
-consuming repo decides when to take a new version, and the version it is on is recorded in its own
-history.
+A submodule pins one commit. Consumers can update manually with the commands above,
+or enroll in [automatic synchronization](docs/AUTOMATIC_SYNC.md). Once enrolled,
+a successful upstream check sends a dispatch event and the consumer records a
+normal gitlink update commit on its default branch. Its commit gates and CI still run.
 
 ## THE FAILURE MODE TO KNOW ABOUT
 
