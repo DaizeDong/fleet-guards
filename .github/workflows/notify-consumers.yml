@@ -1,0 +1,24 @@
+name: Notify fleet consumers
+
+on:
+  workflow_run:
+    workflows: [pii-guard]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: notify-fleet-consumers
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    uses: ./.github/workflows/dispatch-consumers.yml
+    secrets:
+      targets: ${{ secrets.FLEET_SYNC_TARGETS }}
+      credentials: ${{ secrets.FLEET_SYNC_CREDENTIALS }}
