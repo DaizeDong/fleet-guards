@@ -39,6 +39,9 @@ to this automation as well as checked kit versions.
    repository Actions policy allows the shared workflow and checkout/setup-python
    actions. Branch protection still applies; grant the automation the appropriate
    repository permission if direct default-branch updates are protected.
+   If a separate CI gate restricts commit identities, register
+   `github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>`
+   as an allowed automation service before the first synchronization.
 6. Run `Sync fleet submodules` manually once. Verify its run, the resulting
    gitlinks, and the consumer CI on the new commit. A dispatch API response of
    HTTP 204 only means the event was accepted, not that synchronization completed.
