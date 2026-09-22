@@ -13,9 +13,13 @@ does not attach the API authentication or dispatch payload that endpoint needs.
 
 The implementation is shared by fleet-guards and fleet-style. Consumers install
 one small workflow from [the template](../templates/fleet-sync.yml). The reusable
-workflow and synchronization script live in fleet-guards. Their `@main` reference
-is an intentional trust decision: enrolled consumers automatically accept updates
-to this automation as well as checked kit versions.
+workflow and synchronization script live in fleet-guards. The reusable workflow's
+`@main` reference is an intentional trust decision: enrolled consumers automatically
+accept workflow updates. Both dispatcher and consumer checkouts pin the Python
+updater to a reviewed, immutable commit, so a newer unverified script cannot run
+while an earlier notification is being processed. After changing the updater,
+run its tests and review it, commit it, then advance both workflow checkout pins
+to that commit in a separate commit.
 
 ## Enroll a consumer
 
@@ -26,6 +30,9 @@ to this automation as well as checked kit versions.
 2. Complete the fleet-guards hook installation. Commit `.githooks/pre-commit`
    and `.githooks/pre-push` forwarding shims that fail if the guard kit is absent.
    Set `core.hooksPath` to `.githooks`, never directly to the submodule directory.
+   Commit both shims with executable Git mode `100755`; on Windows use
+   `git add --chmod=+x .githooks/pre-commit .githooks/pre-push`. Synchronization
+   checks both the Git mode and the runner's executable permission before committing.
 3. Copy `guards/templates/fleet-sync.yml` to `.github/workflows/fleet-sync.yml`
    and commit it on the consumer's default branch. Adjust the copy source if
    the guard submodule has another path.
