@@ -1,6 +1,8 @@
 """Synchronization must fail visibly and only move the selected submodule."""
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -104,3 +106,40 @@ def test_missing_credentials_fail_before_any_dispatch(monkeypatch):
         sync.dispatch_targets([{"repository": "example/consumer", "credential": "unknown"}], {},
                               "DaizeDong/fleet-guards", "a" * 40)
     assert not calls
+
+
+@pytest.fixture
+def hook_checkout(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    monkeypatch.chdir(tmp_path)
+    directory = tmp_path / ".githooks"
+    directory.mkdir()
+    for name in ("pre-commit", "pre-push"):
+        path = directory / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+        subprocess.run(["git", "add", "--chmod=+x", str(path)], check=True)
+    return directory
+
+
+def test_executable_tracked_hooks_are_accepted(hook_checkout):
+    module().require_hooks()
+
+
+def test_missing_hook_is_rejected(hook_checkout):
+    (hook_checkout / "pre-push").unlink()
+    with pytest.raises(RuntimeError, match="shim"):
+        module().require_hooks()
+
+
+def test_hook_without_executable_git_mode_is_rejected(hook_checkout):
+    subprocess.run(["git", "update-index", "--chmod=-x", ".githooks/pre-commit"], check=True)
+    with pytest.raises(RuntimeError, match="non-executable"):
+        module().require_hooks()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not enforce POSIX executable bits")
+def test_hook_without_filesystem_execute_permission_is_rejected(hook_checkout):
+    (hook_checkout / "pre-push").chmod(0o644)
+    with pytest.raises(RuntimeError, match="non-executable"):
+        module().require_hooks()

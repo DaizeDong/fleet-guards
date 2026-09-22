@@ -142,6 +142,16 @@ def git(*args, capture=True):
     return result.stdout.strip() if capture else ""
 
 
+def require_hooks():
+    """Git ignores non-executable hooks, so existence alone cannot arm a gate."""
+    for name in ("pre-commit", "pre-push"):
+        hook = Path(".githooks", name)
+        entry = git("ls-files", "--stage", "--", hook.as_posix()).split()
+        if (not hook.is_file() or not os.access(hook, os.X_OK)
+                or len(entry) < 4 or entry[0] != "100755"):
+            raise RuntimeError("Missing or non-executable .githooks shim; complete fleet-guards installation")
+
+
 def update_consumer(source, expected_sha, token):
     if source not in (*SOURCES, "all"):
         raise ValueError("Unknown upstream repository")
@@ -181,8 +191,7 @@ def update_consumer(source, expected_sha, token):
         for tool in ("pii_guard.py", "data_boundary.py"):
             subprocess.run([sys.executable, str(guard / "tools" / tool)], check=True)
         # Arm existing fail-closed shims. A missing shim must be repaired during enrollment.
-        if not all(Path(".githooks", hook).is_file() for hook in ("pre-commit", "pre-push")):
-            raise RuntimeError("Missing .githooks shims; complete fleet-guards installation")
+        require_hooks()
         git("config", "core.hooksPath", ".githooks")
         bot_name = "github-actions[bot]"
         bot_email = "41898282+github-actions[bot]@users.noreply.github.com"
