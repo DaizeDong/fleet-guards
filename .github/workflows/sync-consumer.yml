@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: DaizeDong/fleet-guards
-          ref: main
+          ref: c39e84cb69955be8eb054109135713c2d10123c8
           path: fleet-sync-tool
           persist-credentials: false
       - uses: actions/setup-python@v5
