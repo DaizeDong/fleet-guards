@@ -49,10 +49,12 @@ identifiers a repository is allowed to contain, each with an argued reason. This
 none, and an empty allowlist asserts nothing. It is created when there is a first exemption to argue
 for, and not before.
 
-**No license badge, and no `LICENSE`.** Chapter 3 makes `License: MIT` mandatory, linking to
-`LICENSE`. No such file exists here and none is being invented: a badge asserting MIT over an
-unlicensed repository is a false claim about what anyone may do with it, and it is the kind of false
-claim that a reader acts on. The slot stays empty until the license question is actually decided.
+**The license, resolved the same day.** Chapter 3 makes `License: MIT` mandatory, linking to
+`LICENSE`, and no such file existed here. None was invented: a badge asserting MIT over an
+unlicensed repository is a false claim about what anyone may do with it, and it is exactly the kind
+of false claim a reader acts on, which for a submodule other repositories pin is worse than for most.
+The license question was then decided rather than deferred. `LICENSE` is MIT, identical to the rest
+of the fleet, and the badge went in with it.
 
 ## Adapted, because the intent survives and the letter does not
 
