@@ -1,0 +1,60 @@
+#!/bin/sh
+# PER-REPO commit-msg -- a FORWARDER, not a rule.
+#
+# WHY THIS FILE EXISTS AT ALL
+# `core.hooksPath` accepts exactly one directory, and in a repo that installs this kit that one
+# directory is this one. A repo-level hooksPath therefore SHADOWS the machine-level hooks entirely,
+# per hook name. That is not a theory: on 2026-09-23 a machine-level `commit-msg` was installed,
+# verified to block a wrapped commit body in a repo with no repo-level hooksPath, and then silently
+# did nothing in a repo that points hooksPath here. The commit sailed through while the hook looked
+# installed.
+#
+# So the slot has to exist here. The RULE does not: it stays in one place, the machine-level hook,
+# and this file only hands the message to it. A second copy of the logic is exactly what the
+# submodule migration removed from 23 repositories, and a copy drifts the first time either side is
+# touched.
+#
+# WHY THE TARGET IS ASKED FOR RATHER THAN HARDCODED
+# The first draft wrote the operator's own hooks directory into this file. Two things were wrong
+# with that, and only one of them was obvious. The obvious one: this kit is vendored into public
+# repositories, so a machine-local path under a home directory does not belong in it, and the
+# repo's own pii_guard blocked the commit that tried. The other one matters more: a hardcoded path
+# is wrong on any machine that puts its hooks elsewhere, and it would be wrong SILENTLY, since a
+# missing file here is a skip. Git already knows the answer, so ask git.
+#
+# WHY A MISSING MACHINE-LEVEL HOOK IS NOT A BLOCK
+# This file runs on machines that have never heard of the operator's house rules. The rule it
+# forwards to is a personal prose convention, not a security property: nothing here keeps an
+# identifier out of a public history. Blocking a contributor's commit over it would be the same
+# over-reach that silently broke a nightly backup twice when the dash rule was applied too widely
+# (see that gate's removal note, 2026-08-31).
+#
+# So: hook present -> its verdict is final, including its failures. Hook absent -> one line saying
+# the check did not run, and exit 0. "Did not run" is still printed, because a silent skip and a
+# clean pass must not look the same.
+#
+# ⚠ This forwards ONLY commit-msg. The security gates (pii_guard, the identity assertion) live in
+# this directory's own pre-commit and pre-push and are not affected by anything here.
+
+MSG_FILE="$1"
+[ -n "$MSG_FILE" ] || exit 0
+
+# The machine-level hooks directory, as git itself resolved it. `--global` on purpose: the LOCAL
+# value is this directory, which is what shadowed the machine-level hook in the first place.
+_dir=$(git config --global core.hooksPath 2>/dev/null)
+if [ -z "$_dir" ]; then
+  exit 0                      # no machine-level hooks configured: nothing to forward to
+fi
+
+case "$_dir" in
+  "~/"*) _dir="$HOME/${_dir#~/}" ;;
+esac
+
+_MACHINE="$_dir/commit-msg"
+if [ ! -f "$_MACHINE" ]; then
+  echo "commit-msg: no machine-level hook in $_dir, so the message check did not run."
+  exit 0
+fi
+
+sh "$_MACHINE" "$MSG_FILE"
+exit $?
