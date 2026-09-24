@@ -23,6 +23,11 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Added
 
+- **Runner choice for the shared sync workflow.** `sync-consumer.yml` takes an optional `runs-on`
+  input, a JSON string of one label or a label array, read with `fromJSON`. The default is
+  `"ubuntu-latest"`, so consumers that pass nothing run exactly as before. It exists for private
+  consumers whose GitHub-hosted jobs no longer start and must sync on a self-hosted runner.
+
 - **A declared version, at 0.1.0.** This repository declares no version in code, in packaging
   metadata or in any manifest, so the spec's four way version agreement had nothing to agree with.
   The floor is set here and in `ROADMAP.md`, and the gap is recorded rather than papered over: with

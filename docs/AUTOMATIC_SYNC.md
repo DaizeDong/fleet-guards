@@ -35,7 +35,12 @@ to that commit in a separate commit.
    checks both the Git mode and the runner's executable permission before committing.
 3. Copy `guards/templates/fleet-sync.yml` to `.github/workflows/fleet-sync.yml`
    and commit it on the consumer's default branch. Adjust the copy source if
-   the guard submodule has another path.
+   the guard submodule has another path. The job runs on `ubuntu-latest` unless
+   the caller passes the optional `runs-on` input, a JSON string holding one label
+   or a label array, for example `runs-on: '["self-hosted","linux"]'` under `with:`.
+   A self-hosted runner needs git, bash, outbound HTTPS to github.com and
+   api.github.com, and a Python 3 that `actions/setup-python` can resolve from its
+   tool cache. The GitHub CLI is not used; the updater calls the REST API directly.
 4. Create the consumer Actions secret `FLEET_SYNC_TOKEN`. Use a dedicated GitHub
    App token or a fine-grained token with Contents read/write for that consumer,
    and Actions read access to the two public kit repositories. A classic token
