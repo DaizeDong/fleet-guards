@@ -2,6 +2,14 @@ name: Synchronize fleet submodules
 
 on:
   workflow_call:
+    inputs:
+      runs-on:
+        description: >-
+          Runner for the sync job, as JSON: a label string or an array of labels,
+          for example '["self-hosted","linux"]'. The default keeps GitHub-hosted Ubuntu.
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
     secrets:
       sync-token:
         required: true
@@ -12,7 +20,7 @@ permissions:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     timeout-minutes: 20
     steps:
       - name: Require the enrolled consumer credential
