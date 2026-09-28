@@ -35,7 +35,8 @@ which is the single home for that reasoning, and what changed lives in `CHANGELO
 - **A measured false-negative rate for the denylist layer.** The structural rules have negative
   controls. The private layer's recall is asserted by argument rather than by a scored corpus.
 - **A run-shape check that is calibrated against real output.** The shape list recognises jsonl
-  ledgers, dated files under output directories and database files. Formats outside that list, an
-  image among them, pass a repository whose only real output is that format.
+  ledgers, dated files under output directories, database files and, since 2026-09-27, Claude Code
+  session transcripts. Formats outside that list, an image among them, pass a repository whose only
+  real output is that format.
 - **A version literal the tests can pin.** This repository declares no version in code, so the one
   in the badge, this heading and the changelog agree by attention rather than by assertion.

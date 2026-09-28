@@ -278,6 +278,112 @@ def test_check4_declaring_the_path_in_tool_is_the_documented_escape(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
+# CLAUDE CODE SESSION TRANSCRIPTS -- the shape check 4 could not see until 2026-09-27.
+#
+# A transcript is every prompt, file read and tool result of a session, verbatim. The names below
+# are the SHAPES of a real Claude Code session tree, reduced by hand: the UUIDs are
+# the all-zero nil-style form, the project directory is an example user, the agent ids are
+# example ids. Before these shapes existed, every one of them passed check 4 except the last, which
+# was caught only by the accident of a ledger called `transcript`.
+# ---------------------------------------------------------------------------------------------
+_NIL = "00000000-0000-4000-8000-000000000000"
+TRANSCRIPT_SHAPES = [
+    _NIL + ".jsonl",
+    _NIL + ".jsonl.gz",
+    "sessions/" + _NIL + ".jsonl",
+    "C--Users-example-proj/" + _NIL + ".jsonl",
+    "C--Users-example-proj/" + _NIL + "/subagents/agent-a0example.jsonl",
+    "C--Users-example-proj/" + _NIL + "/subagents/agent-a0example.meta.json",
+    "C--Users-example-proj/" + _NIL + "/subagents/workflows/wf_example/agent-a0example.jsonl.gz",
+    "C--Users-example-proj/.fork-" + _NIL + ".tmp",
+    "C--Users-example-proj/memory/MEMORY.md",
+    "-home-example-proj/" + _NIL + ".jsonl",
+    "subagents/agent-a0example.jsonl",
+    _NIL + "/tool-results/toolu_example.txt",
+    _NIL + "/workflows/wf_example.json",
+    "backup/.claude/projects/notes.md",
+]
+
+
+@pytest.mark.parametrize("rel", TRANSCRIPT_SHAPES)
+def test_check4_catches_a_claude_code_transcript(tmp_path, rel):
+    """Poison: one session-tree file, tracked, undeclared. Expected: exit 1, the path named."""
+    repo = make_repo(tmp_path, files={rel: "{}\n", "README.md": "# tool\n"},
+                     manifest=base_manifest())
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, rel, "RUN-SHAPE")
+    assert "CLAUDE CODE" in out, "caught, but for the wrong reason:\n%s" % out
+
+
+def test_check4_transcript_over_rejection_ordinary_jsonl_and_uuids_pass(tmp_path):
+    """The other half. `.jsonl` is the most ordinary fixture extension there is, and UUIDs appear
+    in hand-written code, docs and lockfiles. None of these may trip the transcript shapes: a
+    shape that reddens a lockfile is switched off within a week, and then nothing is checked."""
+    clean = {
+        "package-lock.json": "{}\n",
+        "tests/fixtures/sample.jsonl": "{}\n",
+        "tests/fixtures/session_small.jsonl": "{}\n",
+        "tests/fixtures/agent-example.jsonl": "{}\n",
+        "schemas/" + _NIL + ".json": "{}\n",
+        "docs/" + _NIL + ".md": "an id in a doc name\n",
+        "src/" + _NIL + "_migration.py": "X = 1\n",
+        "src/agents/agent-runner.jsonl.example": "{}\n",
+        "src/a--b.py": "X = 1\n",
+        "src/convo_chain/transcript.py": "X = 1\n",
+        "docs/subagents.md": "how subagents work\n",
+        "-weird/notes.md": "a hyphen-led directory that is not an encoded project path\n",
+    }
+    repo = make_repo(tmp_path, files=clean, manifest=base_manifest())
+    rc, out = run_guard(repo)
+    assert rc == CLEAN, "ordinary tool material wearing a UUID or .jsonl must pass:\n%s" % out
+
+
+TRANSCRIPT_GEN = (
+    "import argparse, os\n"
+    "ap = argparse.ArgumentParser()\n"
+    "ap.add_argument(\"--out\")\n"
+    "a = ap.parse_args()\n"
+    "open(os.path.join(a.out, \"" + _NIL + ".jsonl\"), \"w\", newline=\"\")"
+    ".write('{\"type\": \"user\", \"synthetic\": true}\\n')\n"
+)
+
+
+def test_check4_a_generated_transcript_fixture_is_the_legitimate_route(tmp_path):
+    """A tool that parses transcripts needs transcript-shaped fixtures. The route is the one every
+    other fixture takes: declare it under `fixture`, and check 2 then demands the generator
+    reproduce it byte for byte, which a pasted real session cannot satisfy."""
+    rel = "fx/" + _NIL + ".jsonl"
+    files = {rel: '{"type": "user", "synthetic": true}\n', "tools/make_fixtures.py": TRANSCRIPT_GEN}
+    repo = make_repo(tmp_path, files=files, manifest=base_manifest(fixture=[rel]))
+    rc, out = run_guard(repo)
+    assert rc == CLEAN, "a generator-reproduced transcript fixture must pass:\n%s" % out
+
+
+def test_check4_a_pasted_real_transcript_declared_as_fixture_is_still_blocked(tmp_path):
+    """The escape hatch must not become the leak: declaring a real session as a fixture moves it
+    from check 4 to check 2, and check 2 refuses it because no generator produces it."""
+    rel = "fx/" + _NIL + ".jsonl"
+    files = {rel: '{"type": "user", "message": "a real prompt"}\n',
+             "tools/make_fixtures.py": TRANSCRIPT_GEN}
+    repo = make_repo(tmp_path, files=files, manifest=base_manifest(fixture=[rel]))
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, rel, "HAND-EDITED")
+
+
+def test_transcript_probes_calibrate(tmp_path):
+    """A repo that writes transcripts can now declare them as probes and read CALIBRATED, which
+    until this shape landed was a PROBE-MISS that blocked every commit."""
+    probes = ["C--Users-example-proj/" + _NIL + ".jsonl",
+              "C--Users-example-proj/" + _NIL + "/subagents/agent-a0example.jsonl",
+              "C--Users-example-proj/.fork-" + _NIL + ".tmp"]
+    repo = make_repo(tmp_path, files={"README.md": "# tool\n"},
+                     manifest=base_manifest(_run_shape_probes=probes))
+    rc, out = run_guard(repo, "--calibration")
+    assert rc == CLEAN, out
+    assert "PROBE-MISS" not in out and "NOT CALIBRATED" not in out, out
+
+
+# ---------------------------------------------------------------------------------------------
 # CHECK 1 -- a DATA-class path must not be in the index.
 # ---------------------------------------------------------------------------------------------
 def test_check1_declared_data_path_that_is_tracked_is_blocked(tmp_path):
