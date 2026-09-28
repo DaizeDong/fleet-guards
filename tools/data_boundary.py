@@ -173,13 +173,20 @@ RUN_SHAPES = (
     # most ordinary test-fixture extension there is. Each arm below needs something no hand-written
     # file carries: a full RFC 4122 UUID as the whole stem, a `subagents/agent-` path, a UUID
     # directory holding a session sidecar, or Claude Code's encoded project directory name.
+    # The workflow-journal, tool-result and custom-title arms catch a session's sidecar folder
+    # copied WITHOUT its UUID parent (review 2026-09-27: 593 journals and every tool-result
+    # passed once the parent was stripped). Each still needs a name no hand-written file carries.
     ("a CLAUDE CODE SESSION TRANSCRIPT -- a UUID-named .jsonl is one whole conversation, verbatim",
      re.compile(r"(^|/)" + _UUID + r"\.jsonl(\.gz)?$"
                 r"|(^|/)\.fork-" + _UUID + r"\.tmp$", re.I)),
     ("a CLAUDE CODE SUBAGENT TRANSCRIPT -- subagents/**/agent-<id>.jsonl and its .meta.json",
-     re.compile(r"(^|/)subagents/(.+/)?agent-[A-Za-z0-9_.-]+\.(jsonl(\.gz)?|meta\.json)$", re.I)),
+     re.compile(r"(^|/)subagents/(.+/)?agent-[A-Za-z0-9_.-]+\.(jsonl(\.gz)?|meta\.json)$"
+                r"|(^|/)subagents/workflows/wf_[A-Za-z0-9_-]+/journal\.jsonl(\.gz)?$", re.I)),
     ("a CLAUDE CODE SESSION SIDECAR -- tool results and workflow state kept beside a transcript",
-     re.compile(r"(^|/)" + _UUID + r"/(subagents|tool-results|workflows)/", re.I)),
+     re.compile(r"(^|/)" + _UUID + r"/(subagents|tool-results|workflows)/"
+                r"|(^|/)" + _UUID + r"/custom-title\.json$"
+                r"|(^|/)tool-results/toolu_[A-Za-z0-9_-]+\.(txt|json)$"
+                r"|(^|/)tool-results/pdf-" + _UUID + r"/page-[0-9]+\.(jpg|jpeg|png)$", re.I)),
     # The encoded form replaces every path separator (and the drive colon) with '-': a Windows
     # project becomes `C--Users-name-proj`, a POSIX one `-home-name-proj`. The POSIX arm names the
     # roots rather than accepting any leading hyphen, because `-foo/` is otherwise just an odd name.
