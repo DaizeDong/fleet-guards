@@ -302,6 +302,17 @@ TRANSCRIPT_SHAPES = [
     _NIL + "/tool-results/toolu_example.txt",
     _NIL + "/workflows/wf_example.json",
     "backup/.claude/projects/notes.md",
+    # Each arm alone, with no encoded project directory or UUID parent above it to catch it
+    # instead (review 2026-09-27: deleting the .fork arm or the .meta.json arm left every test green).
+    ".fork-" + _NIL + ".tmp",
+    "subagents/agent-a0example.meta.json",
+    # A session's sidecar folder copied without its UUID parent.
+    "subagents/workflows/wf_example/journal.jsonl",
+    "subagents/workflows/wf_example/journal.jsonl.gz",
+    "tool-results/toolu_example.txt",
+    "tool-results/toolu_example.json",
+    "tool-results/pdf-" + _NIL + "/page-1.jpg",
+    _NIL + "/custom-title.json",
 ]
 
 
@@ -332,6 +343,11 @@ def test_check4_transcript_over_rejection_ordinary_jsonl_and_uuids_pass(tmp_path
         "src/convo_chain/transcript.py": "X = 1\n",
         "docs/subagents.md": "how subagents work\n",
         "-weird/notes.md": "a hyphen-led directory that is not an encoded project path\n",
+        "docs/journal.jsonl": "{}\n",
+        "workflows/wf_example/journal.jsonl": "{}\n",
+        "tool-results/summary.txt": "a hand-written results note\n",
+        "tests/custom-title.json": "{}\n",
+        "src/.fork-helper.tmp": "scratch\n",
     }
     repo = make_repo(tmp_path, files=clean, manifest=base_manifest())
     rc, out = run_guard(repo)
