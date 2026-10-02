@@ -57,6 +57,48 @@ runs:
           echo "::error::the guards submodule has no test_datadir.py -- a guard that is not here is not a guard"; exit 1; }
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_datadir.py" -q
 
+    - name: Boundary tests (does the primary control still reject unsafe paths?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_data_boundary.py" || {
+          echo "::error::the guards submodule has no test_data_boundary.py -- the boundary suite cannot be skipped"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_data_boundary.py" -q
+
+    - name: Git context tests (do physical destinations and original objects stay authoritative?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_git_context.py" || {
+          echo "::error::the guards submodule has no test_git_context.py -- the Git context suite cannot be skipped"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_git_context.py" -q
+
+    - name: HTTPS transport tests (are routing and certificate trust preserved?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_https_transport.py" || {
+          echo "::error::the guards submodule has no test_https_transport.py"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_https_transport.py" -q
+
+    - name: SSH transport tests (is server authentication preserved?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_ssh_transport.py" || {
+          echo "::error::the guards submodule has no test_ssh_transport.py"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_ssh_transport.py" -q
+
+    - name: Fleet synchronization tests (do consumers advance only to verified revisions?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_fleet_sync.py" || {
+          echo "::error::the guards submodule has no test_fleet_sync.py"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_fleet_sync.py" -q
+
+    - name: CI test coverage (does every shipped pytest module run here?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_ci_coverage.py" || {
+          echo "::error::the guards submodule has no test_ci_coverage.py"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_ci_coverage.py" -q
+
     # The DATA BOUNDARY -- the primary control. It is the question that actually matters: is this
     # repo an uninitialized tool, or does it contain somebody's life?
     #

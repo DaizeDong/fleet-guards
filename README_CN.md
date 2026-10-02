@@ -75,6 +75,14 @@ CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。
 必须在 `guards/hooks/<hook>` 缺失时停住，存在时再 exec 过去。让 git 直接指向一个空的 submodule 会静
 默地关掉闸门；被提交进来的转发脚本，正是察觉「克隆不完整」的那个东西。
 
+如果还要保留机器级的提交说明检查，可按[英文安装说明](README.md#install)增加可选的
+`.githooks/commit-msg` 转发脚本，并用 `git add --chmod=+x .githooks/commit-msg` 设置可执行位。
+`core.hooksPath` 仍指向 `.githooks`；套件会查询 Git 的全局钩子目录，并原样返回检查结果。
+
+伴生仓检查只加载目标仓已登记的 fleet-guards 子模块中的解析器，支持自定义子模块路径。
+独立部署应运行该仓自己的 `tools/data_boundary.py`，也可用 `--companion-dir` 明确指定数据目录。
+子模块或解析器缺失时检查会失败，不会转去加载消费仓里遗留的副本。
+
 一定要用 HTTPS URL，不要用 ssh 主机别名。`.gitmodules` 是提交并共享的，所以这个 url 必须对每一个克隆
 者都能解析，包括 CI runner。第一次迁移用了本机 ssh 别名，三个 workflow 全部当场以 "Could not read from
 remote repository" 失败。

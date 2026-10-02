@@ -85,6 +85,28 @@ installation. A shim must stop if `guards/hooks/<hook>` is missing, then execute
 Git directly at an empty submodule disables the gate silently; the committed shims are what detect
 an incomplete clone.
 
+To preserve an optional machine-level commit-message rule, also commit the following as
+`.githooks/commit-msg` and mark it executable with `git add --chmod=+x .githooks/commit-msg`.
+Keep `core.hooksPath` set to `.githooks`. Adjust `guards` if the kit has a different submodule path.
+The kit forwarder asks Git for the global hook directory and propagates that rule's exit status.
+
+<!-- optional-commit-msg-shim -->
+```sh
+#!/bin/sh
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+HOOK="$ROOT/guards/hooks/commit-msg"
+if [ ! -f "$HOOK" ]; then
+  echo "commit-msg: the configured guard forwarder is missing" >&2
+  exit 1
+fi
+exec sh "$HOOK" "$@"
+```
+
+Companion auditing uses the target's registered fleet-guards submodule, including a custom
+submodule path. A missing checkout or resolver blocks the audit. For a standalone deployment,
+run that repository's own `tools/data_boundary.py`; an external checker will not import a loose
+consumer copy. `--companion-dir` remains available when explicitly selecting the DATA store.
+
 USE THE HTTPS URL, not an ssh host alias. `.gitmodules` is committed and shared, so the url has to
 resolve for everyone who clones, including a CI runner. The first migration used a local ssh alias
 and all three workflows failed immediately with "Could not read from remote repository".
@@ -112,6 +134,41 @@ python guards/tools/pii_guard.py --tree --history
 python guards/tools/data_boundary.py
 python guards/tools/test_companion_contract.py
 ```
+
+The TOOL check rejects declared DATA and sealed paths that physically exist, including ignored
+files and empty declared directories. Keep those paths in a separate private companion repository.
+
+Staged and range scans compare decoded Git blobs, so UTF-16 editor files receive the same
+addition-only checks as UTF-8. Unchanged and removed lines stay outside those incremental scans;
+merge additions must be new against every parent. Range scans also check newly introduced paths,
+including rename destinations and gitlinks. Tree scans exclude indexed submodules from their parent;
+scan each child repository separately to check its content.
+All Git discovery and object reads use original objects, including commit and tag metadata.
+Replacement objects cannot conceal reachable history. Hook repository selectors and the selected
+index remain in effect for scans of the repository being checked.
+
+Format-2 private token policies require an integer `count` matching all loaded entries, including
+the canary. Legacy policies remain readable and report that completeness is unattested. The DATA
+resolver follows the physical installation when imported through a directory alias and refuses
+authorization if filesystem resolution fails. Visibility remains a separate companion audit.
+
+Audit that companion with:
+
+```bash
+python guards/tools/data_boundary.py --companion-dir ../example-skill-config --visibility-map /path/to/visibility.json
+```
+
+The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed`
+timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and
+push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL
+rewrites and additional push URLs are checked. The audit prints the verified repository names and
+allows versioned DATA there. Missing or stale evidence, public destinations, and unrecognized hosts
+or SSH aliases block the audit. This check uses the local receipt and does not make network calls.
+
+Companion discovery starts at the physical DATA destination, independently of the invoking hook's
+repository and index. Its stored repository configuration and its effective process configuration
+must both identify only PRIVATE destinations. A temporary URL rewrite cannot turn a PUBLIC store
+into an authorized companion. Linked worktrees remain supported.
 
 ## What is in here
 

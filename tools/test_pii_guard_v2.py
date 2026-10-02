@@ -22,6 +22,836 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pii_guard as g  # noqa: E402
+from make_fixtures import synthetic_token, write_policy, write_visibility, write_ci_suite
+from make_fixtures import write_invalid_git_marker, write_stale_guard, structural_probe
+from make_fixtures import write_encoded_record, write_count_policy
+from make_fixtures import make_history_fixture, make_tree_ref_fixture
+from make_fixtures import write_encoding_probe, reencode_record
+from make_fixtures import make_identity_shape_fixture
+
+
+@pytest.mark.parametrize("role", ["author", "committer"])
+@pytest.mark.parametrize("domain_case", ["lower", "upper", "mixed"])
+@pytest.mark.parametrize("numeric", [False, True])
+def test_source8_identity_shape_domain_case(repo, tmp_path, role, domain_case, numeric):
+    from pathlib import Path
+    import shutil
+
+    source = Path(GUARD).parent.parent
+    kit = tmp_path / "identity-kit"
+    (kit / "hooks").mkdir(parents=True)
+    (kit / "tools").mkdir()
+    for name in ("hooks/pre-commit", "tools/pii_guard.py", "tools/data_boundary.py"):
+        shutil.copyfile(source / name, kit / name)
+    (kit / "hooks/pre-commit").chmod(0o755)
+    allowed = make_identity_shape_fixture(repo, tmp_path, role, domain_case, numeric)
+    policy = write_policy(tmp_path / "identity-policy.json", synthetic_token("identity-shape"), g.CANARY_TOKEN)
+    repo.env["PII_DENYLIST"] = str(policy)
+    repo.git("config", "core.hooksPath", str(kit / "hooks"))
+    repo.git("add", "--all")
+    result = repo.git("commit", "-m", "synthetic identity hook control", allow_fail=True)
+    output = result.stdout + result.stderr
+    if allowed:
+        assert result.returncode == 0, output
+        assert "only the address-shape check ran" in output
+        assert repo.git("rev-parse", "--verify", "HEAD").returncode == 0
+    else:
+        assert result.returncode != 0, output
+        assert "IDENTITY MALFORMED" in output
+        assert repo.git("rev-parse", "--verify", "HEAD", allow_fail=True).returncode != 0
+
+
+def test_source7_self_exclusion_keeps_other_owner(tmp_path, monkeypatch):
+    from make_fixtures import write_owner_scope_visibility
+    vis = tmp_path / "owners.json"
+    current, name = write_owner_scope_visibility(vis, g._utcnow())
+    monkeypatch.setattr(g, "_repo_slug", lambda root: (current, current.split("/")[-1]))
+    tokens = g.load_cross_repo_tokens(".", str(vis))
+    assert [(token.value, token.kind) for token in tokens] == [(name, "linkage")]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_source7_duplicate_owner_severity_is_order_independent(tmp_path, monkeypatch, reverse):
+    from make_fixtures import write_owner_scope_visibility
+    vis = tmp_path / "owners.json"
+    current, name = write_owner_scope_visibility(vis, g._utcnow(), duplicate=True, reverse=reverse)
+    monkeypatch.setattr(g, "_repo_slug", lambda root: (current, current.split("/")[-1]))
+    tokens = g.load_cross_repo_tokens(".", str(vis))
+    assert [(token.value, token.kind) for token in tokens] == [(name, "linkage")]
+    findings = []
+    g.scan_text("example-owner-b/" + name, "synthetic text", set(), g.Policy.of(tokens), findings)
+    assert any(severity == "BLOCK" for _where, _label, _value, severity in findings)
+
+
+@pytest.mark.parametrize("domain", ["tree", "staged", "range", "history"])
+@pytest.mark.parametrize("blocked", [False, True])
+@pytest.mark.parametrize("suffix", [".png", ".example", ".test", ".invalid"])
+def test_source7_binary_filename_identifiers(repo, domain, blocked, suffix):
+    from make_fixtures import write_mailbox_filename
+    relative, mailbox = write_mailbox_filename(repo.root, suffix=suffix, blocked=blocked)
+    repo.git("add", "--", relative)
+    if domain in ("range", "history"):
+        repo.git("commit", "-qm", "synthetic filename")
+    policy = g.Policy.of([])
+    if domain == "tree":
+        findings = g.scan_tree(repo.root, set(), policy)
+    elif domain == "staged":
+        findings = g.scan_staged(repo.root, set(), policy)
+    elif domain == "range":
+        findings = g.scan_range(repo.root, set(), policy, "HEAD")
+    else:
+        findings = g.scan_history(repo.root, set(), policy)
+    path_findings = [item for item in findings if "(path)" in item[0]]
+    assert any(label == "PERSONAL-MAILBOX" and value == mailbox and severity == "BLOCK"
+               for _where, label, value, severity in path_findings) is blocked
+    if not blocked:
+        assert not path_findings
+
+
+
+@pytest.mark.parametrize("suffix", [".png", ".example", ".test", ".invalid"])
+@pytest.mark.parametrize("exemption", ["mailbox", "filename", "synthetic"])
+def test_source7_filename_exact_and_synthetic_exemptions(tmp_path, suffix, exemption):
+    from make_fixtures import write_mailbox_filename
+    relative, mailbox = write_mailbox_filename(tmp_path, suffix=suffix, blocked=exemption != "synthetic")
+    allow = {mailbox} if exemption == "mailbox" else {mailbox + suffix} if exemption == "filename" else set()
+    for domain in ("tree", "staged", "range", "history"):
+        findings = []
+        g.scan_text(relative, "synthetic (path)", allow, g.Policy.of([]), findings,
+                    domain=domain, path_text=True)
+        assert not findings
+
+
+@pytest.mark.parametrize("suffix", [".example", ".test", ".invalid"])
+def test_source7_filename_synthetic_placeholder_preserved(tmp_path, suffix):
+    from make_fixtures import write_mailbox_filename
+    relative, _mailbox = write_mailbox_filename(tmp_path, suffix=suffix, placeholder=True)
+    findings = []
+    g.scan_text(relative, "synthetic (path)", set(), g.Policy.of([]), findings, path_text=True)
+    assert not findings
+
+
+@pytest.mark.parametrize("field,target", [
+    ("annotation", "commit"), ("annotation", "tree"), ("annotation", "blob"),
+    ("tagger_email", "commit"), ("tagger_name", "commit"),
+    ("ref_name", "commit"), ("object_name", "commit"), ("nested_annotation", "commit"),
+])
+@pytest.mark.parametrize("blocked", [False, True])
+def test_source7_tag_metadata_is_scanned(repo, field, target, blocked):
+    from make_fixtures import make_tag_metadata_fixture
+    fixture = make_tag_metadata_fixture(repo, field, target, blocked)
+    findings = g.scan_history(repo.root, set(), g.Policy.of([g.Token(fixture["token"], "secret")]))
+    assert any(value == fixture["expected"] and severity == "BLOCK"
+               for _where, _label, value, severity in findings) is blocked
+    if not blocked:
+        assert not findings
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_source7_tag_cli_and_push_hook(repo, tmp_path, blocked):
+    from pathlib import Path
+    import shutil
+    from make_fixtures import make_tag_metadata_fixture, write_empty_tool_classification
+    write_empty_tool_classification(repo.root)
+    fixture = make_tag_metadata_fixture(repo, "annotation", blocked=blocked)
+    cli = _source4_cli(repo, tmp_path, fixture["token"], "--tree", "--history")
+    assert cli.returncode == (1 if blocked else 0), cli.stdout + cli.stderr
+    source = Path(GUARD).parent.parent
+    kit = tmp_path / "hook-kit"
+    for name in ("hooks/pre-push", "tools/pii_guard.py", "tools/data_boundary.py"):
+        (kit / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / name, kit / name)
+    policy = write_policy(tmp_path / "hook-policy.json", fixture["token"], g.CANARY_TOKEN)
+    bash = (Path(shutil.which("git")).parent.parent / "bin/bash.exe"
+            if os.name == "nt" else Path(shutil.which("bash")))
+    result = subprocess.run([str(bash), "--noprofile", "--norc", str(kit / "hooks/pre-push")],
+                            cwd=repo.root, env=dict(repo.env, PII_DENYLIST=str(policy)),
+                            capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == (1 if blocked else 0), result.stdout + result.stderr
+    if blocked:
+        assert "push BLOCKED by pii_guard" in result.stdout + result.stderr
+
+
+def test_source7_oversize_tag_metadata_refuses_before_read(repo, monkeypatch):
+    from make_fixtures import make_tag_metadata_fixture
+    make_tag_metadata_fixture(repo, "annotation", blocked=False)
+    monkeypatch.setattr(g, "MAX_BLOB_BYTES", 64)
+    with pytest.raises(g.GitError, match="tag metadata exceeds"):
+        g.scan_history(repo.root, set(), g.Policy.of([]))
+
+
+@pytest.mark.parametrize("shape", ["file", "directory", "gitlink", "odd-name"])
+@pytest.mark.parametrize("blocked", [False, True])
+@pytest.mark.parametrize("with_commit", [False, True])
+def test_source6_history_tree_ref_paths(repo, tmp_path, shape, blocked, with_commit):
+    fixture = make_tree_ref_fixture(repo, shape, blocked, with_commit)
+    listing = repo.git("ls-tree", "-r", "-t", "-z", fixture["trees"][0]).stdout
+    names = {entry.split("\t", 1)[1] for entry in listing.split("\0") if entry}
+    assert set(fixture["paths"]) <= names
+    policy = g.Policy.of([g.Token(fixture["token"], "secret")])
+    stats = g._blank_history_stats()
+    findings = g.scan_history(repo.root, set(), policy, stats)
+    assert stats["commits"] == int(with_commit)
+    assert stats["blobs_scanned"] == 1 + int(with_commit)
+    hits = [where for where, _, value, severity in findings
+            if value == fixture["token"] and severity == "BLOCK"]
+    assert bool(hits) is blocked, findings
+    if blocked:
+        assert any(where == "<blob> %s (path)" % path
+                   for where in hits for path in fixture["paths"])
+    result = _source4_cli(repo, tmp_path, fixture["token"], "--history")
+    assert result.returncode == int(blocked), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("with_commit", [False, True])
+def test_source6_history_annotated_tree_ref(repo, tmp_path, with_commit):
+    fixture = make_tree_ref_fixture(repo, "file", True, with_commit, annotated=True)
+    findings = g.scan_history(repo.root, set(), g.Policy.of([fixture["token"]]))
+    assert any(where == "<blob> %s (path)" % fixture["paths"][0]
+               and value == fixture["token"] and severity == "BLOCK"
+               for where, _, value, severity in findings), findings
+    result = _source4_cli(repo, tmp_path, fixture["token"], "--history")
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_source6_history_tree_ref_without_blobs(repo, capsys, blocked):
+    fixture = make_tree_ref_fixture(repo, "gitlink-only", blocked)
+    stats = g._blank_history_stats()
+    findings = g.scan_history(repo.root, set(), g.Policy.of([fixture["token"]]), stats)
+    assert stats["commits"] == stats["blobs_total"] == 0
+    assert bool(findings) is blocked, findings
+    assert "examined nothing" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("ordinary_alias", [False, True])
+@pytest.mark.parametrize("with_commit", [False, True])
+def test_source6_history_tree_ref_aliases(repo, ordinary_alias, with_commit):
+    fixture = make_tree_ref_fixture(repo, "aliases", ordinary_alias, with_commit)
+    for tree in fixture["trees"]:
+        assert fixture["blob"] in repo.git("ls-tree", "-r", "-z", tree).stdout
+    findings = g.scan_history(repo.root, set(), g.Policy.of([]))
+    if ordinary_alias:
+        assert any(where == "<blob> notes.md" and severity == "BLOCK"
+                   for where, _, _, severity in findings), findings
+    else:
+        assert findings == []
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be-bom", "utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("variant", ["ascii", "mixed", "ambiguous"])
+def test_source5_encoding_candidates_keep_identifiers(tmp_path, encoding, variant):
+    path, tokens = write_encoding_probe(tmp_path, "notes.md", encoding, variant)
+    text, detected = g._decode_best(path.read_bytes())
+    assert text is not None, detected
+    assert all(token in text for token in tokens), (detected, tokens)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("relative", ["notes.md", "tools/pii_guard.py"])
+@pytest.mark.parametrize("domain", ["tree", "history", "staged", "range"])
+def test_source5_encoding_domains(repo, tmp_path, encoding, relative, domain):
+    token = synthetic_token("encoded-domain")
+    write_encoded_record(repo.root, relative, ["# café 中文 Ā baseline"], encoding)
+    repo.commit("synthetic baseline")
+    write_encoding_probe(repo.root, relative, encoding, "ascii", token=token)
+    repo.git("add", "--", relative)
+    if domain in {"history", "range"}:
+        repo.git("commit", "-qm", "synthetic addition")
+    if domain != "tree":
+        write_encoded_record(repo.root, relative, ["# clean working copy"], encoding)
+    if domain in {"staged", "range"}:
+        _source4_incremental(repo, tmp_path, token, domain, True)
+    else:
+        policy = g.Policy.of([g.Token(token, "secret")])
+        findings = getattr(g, "scan_" + domain)(repo.root, set(), policy)
+        assert any(value == token and severity == "BLOCK" for _, _, value, severity in findings)
+        result = _source4_cli(repo, tmp_path, token, "--" + domain)
+        assert result.returncode == 1, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("operation", ["unchanged", "removed", "reencoded"])
+@pytest.mark.parametrize("domain", ["staged", "range"])
+def test_source5_encoding_existing_content(repo, tmp_path, encoding, operation, domain):
+    token = synthetic_token("encoded-existing-control")
+    before = ["# café 中文 Ā", token]
+    write_encoded_record(repo.root, "notes.md", before, "utf-8" if operation == "reencoded" else encoding)
+    repo.commit("synthetic accepted content")
+    after = ["# café 中文 Ā edited"] + ([] if operation == "removed" else [token])
+    write_encoded_record(repo.root, "notes.md", after, encoding)
+    repo.git("add", "notes.md")
+    if domain == "range":
+        repo.git("commit", "-qm", "synthetic edit")
+    _source4_incremental(repo, tmp_path, token, domain, False)
+
+
+@pytest.mark.parametrize("domain", ["staged", "range"])
+def test_source5_encoding_ambiguous_existing_content(repo, tmp_path, domain):
+    token = synthetic_token("other-byte-order")
+    path, _ = write_encoding_probe(repo.root, "notes.md", "utf-16-be", "ambiguous")
+    repo.commit("synthetic accepted ambiguous content")
+    reencode_record(path, "utf-16-be", "utf-8")
+    repo.git("add", "notes.md")
+    if domain == "range":
+        repo.git("commit", "-qm", "synthetic reencoding")
+    _source4_incremental(repo, tmp_path, token, domain, False)
+
+
+def test_source5_encoding_malformed_and_binary_controls(tmp_path):
+    path, _ = write_encoding_probe(tmp_path, "notes.md", "utf-16-be-bom")
+    assert g._decode_best(path.read_bytes()[:-1]) == (None, None)
+    assert g._decode_best(bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] * 200)) == (None, None)
+
+
+@pytest.mark.parametrize("head_state", ["valid", "unborn-branch", "unborn-tag"])
+@pytest.mark.parametrize("violation", ["clean", "blob", "message", "author"])
+def test_source5_history_reachable_refs(repo, tmp_path, head_state, violation):
+    token = make_history_fixture(repo, head_state, violation)
+    stats = g._blank_history_stats()
+    findings = g.scan_history(repo.root, set(), g.Policy.of([g.Token(token, "secret")]), stats)
+    assert stats["commits"] == 1
+    assert stats["blobs_total"] == stats["blobs_scanned"] == 1
+    if violation == "clean":
+        assert findings == []
+    elif violation == "author":
+        assert any(label == "AUTHOR-EMAIL" and value == "user1@example.com" and severity == "BLOCK"
+                   for _, label, value, severity in findings), findings
+    else:
+        location = "<blob>" if violation == "blob" else "<commit message>"
+        assert any(where.startswith(location) and value == token and severity == "BLOCK"
+                   for where, _, value, severity in findings), findings
+    result = _source4_cli(repo, tmp_path, token, "--history")
+    assert result.returncode == (0 if violation == "clean" else 1), result.stdout + result.stderr
+    assert "examined nothing" not in result.stdout + result.stderr
+    if violation == "clean":
+        assert "1 commit(s), 1 blob(s) scanned" in result.stdout + result.stderr
+
+
+def test_source5_history_empty_is_reported(repo, tmp_path, capsys):
+    token = make_history_fixture(repo, "empty")
+    stats = g._blank_history_stats()
+    assert g.scan_history(repo.root, set(), g.Policy.of([]), stats) == []
+    assert stats == g._blank_history_stats()
+    assert "examined nothing" in capsys.readouterr().err
+    result = _source4_cli(repo, tmp_path, token, "--history")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 commit(s), 0 blob(s) scanned" in result.stdout + result.stderr
+    assert "examined nothing" in result.stdout + result.stderr
+
+
+def test_source5_history_blob_tag_without_commits(repo, tmp_path):
+    token = make_history_fixture(repo, "blob-tag", "blob")
+    stats = g._blank_history_stats()
+    findings = g.scan_history(repo.root, set(), g.Policy.of([g.Token(token, "secret")]), stats)
+    assert stats["commits"] == 0
+    assert stats["blobs_total"] == stats["blobs_scanned"] == 1
+    assert any(value == token and severity == "BLOCK" for _, _, value, severity in findings)
+    result = _source4_cli(repo, tmp_path, token, "--history")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "examined nothing" not in result.stdout + result.stderr
+
+
+def test_source5_history_broken_head_fails(repo, tmp_path):
+    token = make_history_fixture(repo, "broken", "blob")
+    with pytest.raises(g.GitError):
+        g.scan_history(repo.root, set(), g.Policy.of([g.Token(token, "secret")]))
+    result = _source4_cli(repo, tmp_path, token, "--history")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "SCAN FAILED" in result.stdout + result.stderr
+    assert "clean (history)" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("command", ["rev-list", "log", "cat-file"])
+def test_source5_history_command_errors_are_not_empty(repo, monkeypatch, command):
+    make_history_fixture(repo, "unborn-tag")
+    original = subprocess.run
+    def fail_command(args, *positional, **kwargs):
+        if isinstance(args, list) and len(args) > 1 and args[1] == command:
+            text = kwargs.get("text") or kwargs.get("encoding")
+            return subprocess.CompletedProcess(args, 128, stdout="" if text else b"",
+                                               stderr="synthetic command failure" if text else b"synthetic command failure")
+        return original(args, *positional, **kwargs)
+    monkeypatch.setattr(g.subprocess, "run", fail_command)
+    with pytest.raises(g.GitError):
+        g.scan_history(repo.root, set(), g.Policy.of([]))
+
+
+def _source4_cli(repo, tmp_path, token, *args):
+    policy = write_policy(tmp_path / "source4-policy.json", token, g.CANARY_TOKEN)
+    return subprocess.run([sys.executable, GUARD, "--repo", repo.root, *args],
+                          cwd=repo.root, env=dict(repo.env, PII_DENYLIST=str(policy)),
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _source4_incremental(repo, tmp_path, token, domain, blocked, revision="HEAD^..HEAD"):
+    policy = g.Policy.of([g.Token(token, "secret")])
+    if domain == "staged":
+        findings = g.scan_staged(repo.root, set(), policy)
+        args = ["--staged"]
+    else:
+        findings = g.scan_range(repo.root, set(), policy, revision)
+        args = ["--range", revision]
+    assert any(value == token and severity == "BLOCK" for _, _, value, severity in findings) is blocked, findings
+    result = _source4_cli(repo, tmp_path, token, *args)
+    assert result.returncode == (1 if blocked else 0), result.stdout + result.stderr
+
+
+def test_source4_staged_intent_to_add_is_not_a_staged_disclosure(repo, tmp_path):
+    token = synthetic_token("intent-to-add")
+    write_encoded_record(repo.root, "seed.md", ["synthetic seed"])
+    repo.commit("synthetic seed")
+    relative = token + ".md"
+    write_encoded_record(repo.root, relative, ["synthetic unstaged content"])
+    repo.git("add", "-N", "--", relative)
+    assert repo.git("diff", "--cached", "--name-only").stdout == ""
+    _source4_incremental(repo, tmp_path, token, "staged", False)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-be-bom", "utf-16-le", "cp1252"])
+@pytest.mark.parametrize("relative", ["notes.md", "tools/pii_guard.py"])
+@pytest.mark.parametrize("domain", ["staged", "range"])
+def test_source4_encoded_incremental_addition(repo, tmp_path, encoding, relative, domain):
+    token = synthetic_token("encoded-addition")
+    write_encoded_record(repo.root, relative, ["# café baseline"], encoding)
+    repo.commit("synthetic baseline")
+    write_encoded_record(repo.root, relative, ["# café baseline", "# " + token], encoding)
+    repo.git("add", "--", relative)
+    write_encoded_record(repo.root, relative, ["# cleaned working copy"], encoding)
+    if domain == "range":
+        repo.git("commit", "-qm", "synthetic encoded addition")
+    _source4_incremental(repo, tmp_path, token, domain, True)
+
+
+@pytest.mark.parametrize("operation", ["unchanged", "removed", "reencoded"])
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be-bom"])
+@pytest.mark.parametrize("domain", ["staged", "range"])
+def test_source4_encoded_incremental_existing_controls(repo, tmp_path, operation, encoding, domain):
+    token = synthetic_token("encoded-existing")
+    before = [token, "# café accepted"]
+    write_encoded_record(repo.root, "notes.md", before, "utf-8-sig" if operation == "reencoded" else encoding)
+    repo.commit("synthetic accepted content")
+    after = before if operation == "reencoded" else ([token, "# café edit"] if operation == "unchanged" else ["# removed"])
+    write_encoded_record(repo.root, "notes.md", after, encoding)
+    repo.git("add", "notes.md")
+    if domain == "range":
+        repo.git("commit", "-qm", "synthetic edit")
+    _source4_incremental(repo, tmp_path, token, domain, False)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16", "utf-16-be-bom"])
+@pytest.mark.parametrize("inherited", [False, True])
+def test_source4_encoded_merge_additions(repo, tmp_path, encoding, inherited):
+    token = synthetic_token("merge-encoding")
+    write_encoded_record(repo.root, "notes.md", ["# base"], encoding)
+    repo.commit("synthetic base")
+    repo.git("checkout", "-qb", "side")
+    write_encoded_record(repo.root, "notes.md", ["# side", token] if inherited else ["# side"], encoding)
+    repo.commit("synthetic side")
+    repo.git("checkout", "-q", "master")
+    write_encoded_record(repo.root, "notes.md", ["# main"], encoding)
+    repo.commit("synthetic main")
+    repo.git("merge", "side", "--no-commit", allow_fail=True)
+    write_encoded_record(repo.root, "notes.md", ["# resolved", token], encoding)
+    repo.commit("synthetic resolution")
+    _source4_incremental(repo, tmp_path, token, "range", not inherited, "HEAD ^HEAD^1 ^HEAD^2")
+
+
+@pytest.mark.parametrize("shape", ["file", "directory", "rename", "gitlink"])
+@pytest.mark.parametrize("blocked", [False, True])
+def test_source4_range_new_path_names(repo, tmp_path, shape, blocked):
+    token = synthetic_token("path-name")
+    write_encoded_record(repo.root, "seed.md", ["synthetic seed"])
+    repo.commit("synthetic base")
+    name = token if blocked else "synthetic-safe"
+    relative = name + "/notes.md" if shape == "directory" else name + (".md" if shape != "gitlink" else "")
+    if shape == "gitlink":
+        oid = repo.git("rev-parse", "HEAD").stdout.strip()
+        repo.git("update-index", "--add", "--cacheinfo", "160000", oid, relative)
+    elif shape == "rename":
+        repo.git("mv", "seed.md", relative)
+    else:
+        write_encoded_record(repo.root, relative, ["synthetic safe content"])
+        repo.git("add", "--", relative)
+    repo.git("commit", "-qm", "synthetic new path")
+    _source4_incremental(repo, tmp_path, token, "range", blocked)
+
+
+@pytest.mark.parametrize("operation", ["modified", "deleted", "gitlink-update"])
+def test_source4_range_old_path_names_are_not_new(repo, tmp_path, operation):
+    token = synthetic_token("existing-path")
+    write_encoded_record(repo.root, "seed.md", ["synthetic seed"])
+    repo.commit("synthetic seed")
+    relative = token + ".md"
+    if operation == "gitlink-update":
+        oid = repo.git("rev-parse", "HEAD").stdout.strip()
+        repo.git("update-index", "--add", "--cacheinfo", "160000", oid, relative)
+    else:
+        write_encoded_record(repo.root, relative, ["synthetic accepted path"])
+        repo.git("add", "--", relative)
+    repo.git("commit", "-qm", "synthetic accepted path")
+    if operation == "gitlink-update":
+        oid = repo.git("rev-parse", "HEAD").stdout.strip()
+        repo.git("update-index", "--cacheinfo", "160000", oid, relative)
+    elif operation == "deleted":
+        repo.git("rm", "--", relative)
+    else:
+        write_encoded_record(repo.root, relative, ["synthetic safe edit"])
+        repo.git("add", "--", relative)
+    repo.git("commit", "-qm", "synthetic safe change")
+    _source4_incremental(repo, tmp_path, token, "range", False)
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_source4_merge_new_path_scope(repo, tmp_path, inherited):
+    token = synthetic_token("merge-path")
+    relative = token + "/notes.md"
+    write_encoded_record(repo.root, "seed.md", ["synthetic seed"])
+    repo.commit("synthetic seed")
+    repo.git("checkout", "-qb", "side")
+    write_encoded_record(repo.root, relative if inherited else "side.md", ["synthetic side"])
+    repo.commit("synthetic side")
+    repo.git("checkout", "-q", "master")
+    write_encoded_record(repo.root, "main.md", ["synthetic main"])
+    repo.commit("synthetic main")
+    repo.git("merge", "side", "--no-ff", "--no-commit")
+    write_encoded_record(repo.root, relative, ["synthetic resolution"])
+    repo.commit("synthetic merge")
+    _source4_incremental(repo, tmp_path, token, "range", not inherited, "HEAD ^HEAD^1 ^HEAD^2")
+
+
+@pytest.mark.parametrize("variant", ["missing", "null", "boolean", "string", "float", "mismatch"])
+def test_source4_format2_count_is_mandatory(repo, tmp_path, variant):
+    token = synthetic_token("policy-retained")
+    path = write_count_policy(tmp_path / "count-policy.json", token, g.CANARY_TOKEN, variant)
+    with pytest.raises(g.PolicyError, match="count"):
+        g._parse_denylist(str(path))
+    result = subprocess.run([sys.executable, GUARD, "--repo", repo.root, "--staged"],
+                            env=dict(repo.env, PII_DENYLIST=str(path)), capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "count" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("variant", ["healthy", "legacy-list", "legacy-dict", "legacy-format1"])
+def test_source4_policy_healthy_and_legacy_controls(tmp_path, variant):
+    token = synthetic_token("policy-retained")
+    path = write_count_policy(tmp_path / "count-policy.json", token, g.CANARY_TOKEN, variant)
+    notes = []
+    tokens = g._parse_denylist(str(path), notes=notes)
+    assert any(item.value == token for item in tokens)
+    assert bool(notes) is variant.startswith("legacy")
+
+
+def test_source4_cli_tree_excludes_real_gitlink_but_explicit_files_scan(tmp_path):
+    from test_data_boundary import native_submodule_layout, git
+    parent, module = native_submodule_layout(tmp_path, "vendor/security")
+    token = synthetic_token("child-content")
+    write_encoded_record(module, "notes.md", [token])
+    git(module, "add", "notes.md")
+    policy = g.Policy.of([g.Token(token, "secret")])
+    stats = {}
+    assert g.scan_tree(str(parent), set(), policy, stats=stats) == []
+    assert stats["unreadable"] == []
+    explicit = g.scan_tree(str(parent), set(), policy, files=["vendor/security/notes.md"])
+    child = g.scan_tree(str(module), set(), policy)
+    for findings in (explicit, child):
+        assert any(value == token and severity == "BLOCK" for _, _, value, severity in findings)
+    policy_path = write_policy(tmp_path / "cli-policy.json", token, g.CANARY_TOKEN)
+    for root, blocked in [(parent, False), (module, True)]:
+        result = subprocess.run([sys.executable, GUARD, "--repo", str(root), "--tree"],
+                                env=dict(os.environ, PII_DENYLIST=str(policy_path)), capture_output=True, text=True)
+        assert result.returncode == (1 if blocked else 0), result.stdout + result.stderr
+        assert "NOT scanned" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("directory", ["docs", "nested/docs"])
+def test_source3_invalid_git_marker_cannot_hide_tracked_text(repo, directory):
+    token = synthetic_token("invalid-marker")
+    relative = directory + "/notes.txt"
+    repo.write(relative, token + "\n")
+    repo.commit("synthetic tracked text")
+    write_invalid_git_marker(repo.root, directory)
+    out = g.scan_tree(repo.root, set(), g.Policy.of([g.Token(token, "secret")]))
+    assert any(value == token and severity == "BLOCK" for _, _, value, severity in out), out
+
+
+@pytest.mark.parametrize("hook_name", ["pre-commit", "pre-push"])
+@pytest.mark.parametrize("missing", ["pii_guard.py", "data_boundary.py", "both"])
+def test_source3_native_hook_never_falls_back_to_consumer(repo, tmp_path, hook_name, missing):
+    from pathlib import Path
+    import shutil
+    source = Path(GUARD).parent.parent
+    kit = Path(repo.root) / "guards"
+    (kit / "hooks").mkdir(parents=True)
+    (kit / "tools").mkdir()
+    shutil.copyfile(source / "hooks" / hook_name, kit / "hooks" / hook_name)
+    for name in ["pii_guard.py", "data_boundary.py"]:
+        if missing not in (name, "both"):
+            shutil.copyfile(source / "tools" / name, kit / "tools" / name)
+    repo.git("remote", "remove", "origin")
+    repo.write(".dataclass.json", json.dumps({"data": [], "fixture": [], "_audited": "synthetic"}))
+    repo.write("seed.md", "synthetic seed\n")
+    repo.git("add", ".dataclass.json", "seed.md")
+    repo.git("commit", "-qm", "synthetic baseline")
+    for name in ["pii_guard.py", "data_boundary.py"]:
+        write_stale_guard(repo.root, "tools/" + name)
+    receipt = tmp_path / "stale-called.txt"
+    env = dict(repo.env, FG_SYNTHETIC_RECEIPT=str(receipt))
+    if os.name == "nt":
+        bash = Path(shutil.which("git")).parent.parent / "bin/bash.exe"
+    else:
+        bash = Path(shutil.which("bash"))
+    result = subprocess.run([str(bash), "--noprofile", "--norc", str(kit / "hooks" / hook_name)],
+                            cwd=repo.root, env=env, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "missing" in (result.stdout + result.stderr).lower()
+    assert not receipt.exists(), "The stale consumer scanner executed"
+
+
+@pytest.mark.parametrize("relative", sorted(g.SCANNER_PATHS) + ["notes.md"])
+def test_source3_range_keeps_private_tokens_in_scanner_files(repo, relative):
+    token = synthetic_token("range-secret")
+    policy = g.Policy.of([g.Token(token, "secret")])
+    repo.write(relative, "# base\n")
+    repo.commit("synthetic base")
+    repo.write(relative, "# base\n# " + token + "\n")
+    repo.commit("synthetic addition")
+    out = g.scan_range(repo.root, set(), policy, "HEAD^..HEAD")
+    assert any(value == token and severity == "BLOCK" for _, _, value, severity in out), out
+
+
+@pytest.mark.parametrize("relative,blocked", [("tools/pii_guard.py", False), ("notes.md", True)])
+def test_source3_range_structural_fixture_exemption_is_per_file(repo, relative, blocked):
+    repo.write("seed.md", "synthetic seed\n")
+    repo.commit()
+    repo.write(relative, structural_probe())
+    repo.commit("synthetic structural fixture")
+    out = g.scan_range(repo.root, set(), g.Policy.of([]), "HEAD^..HEAD")
+    assert bool(out) is blocked, out
+
+
+def test_source3_range_does_not_scan_untouched_or_removed_private_lines(repo):
+    token = synthetic_token("range-existing")
+    policy = g.Policy.of([g.Token(token, "secret")])
+    repo.write("tools/pii_guard.py", "# " + token + "\n# old\n")
+    repo.commit("synthetic prior content")
+    repo.write("tools/pii_guard.py", "# " + token + "\n# changed\n")
+    repo.commit("synthetic harmless edit")
+    assert g.scan_range(repo.root, set(), policy, "HEAD^..HEAD") == []
+    repo.write("tools/pii_guard.py", "# cleaned\n")
+    repo.commit("synthetic removal")
+    assert g.scan_range(repo.root, set(), policy, "HEAD^..HEAD") == []
+
+
+@pytest.mark.parametrize("relative", ["tools/pii_guard.py", "notes.md"])
+@pytest.mark.parametrize("content,blocked", [("private", True), ("structural", False)])
+def test_source3_merge_additions_keep_per_file_policy(repo, relative, content, blocked):
+    token = synthetic_token("merge-added")
+    repo.write(relative, "# base\n")
+    repo.commit("synthetic base")
+    repo.git("checkout", "-qb", "side")
+    repo.write(relative, "# side\n")
+    repo.commit("synthetic side")
+    repo.git("checkout", "-q", "master")
+    repo.write(relative, "# main\n")
+    repo.commit("synthetic main")
+    repo.git("merge", "side", "--no-commit", allow_fail=True)
+    repo.write(relative, "# " + token + "\n" if content == "private" else structural_probe())
+    repo.commit("synthetic resolution")
+    out = g.scan_range(repo.root, set(), g.Policy.of([g.Token(token, "secret")]), "HEAD^1..HEAD")
+    expected = blocked or (content == "structural" and relative == "notes.md")
+    assert bool(out) is expected, out
+
+
+def test_source3_documented_commit_message_shim_forwards_verdict(repo, tmp_path):
+    from pathlib import Path
+    import shutil
+    from make_fixtures import write_commit_message_rule
+    source = Path(GUARD).parent.parent
+    doc = (source / "README.md").read_text(encoding="utf-8")
+    script = doc.split("<!-- optional-commit-msg-shim -->", 1)[1].split("```sh\n", 1)[1].split("```", 1)[0]
+    root = Path(repo.root)
+    (root / ".githooks").mkdir()
+    (root / ".githooks/commit-msg").write_text(script, encoding="utf-8")
+    (root / ".githooks/commit-msg").chmod(0o755)
+    (root / "guards/hooks").mkdir(parents=True)
+    shutil.copyfile(source / "hooks/commit-msg", root / "guards/hooks/commit-msg")
+    machine = tmp_path / "machine-hooks"
+    write_commit_message_rule(machine)
+    repo.git("config", "--global", "core.hooksPath", str(machine))
+    repo.git("config", "core.hooksPath", ".githooks")
+    receipt = tmp_path / "message-rule-called.txt"
+    repo.env.update(FG_SYNTHETIC_RECEIPT=str(receipt), FG_SYNTHETIC_COMMIT_STATUS="0")
+    repo.write("notes.md", "synthetic baseline\n")
+    repo.commit("synthetic accepted message")
+    before = repo.git("rev-parse", "HEAD").stdout
+    repo.env["FG_SYNTHETIC_COMMIT_STATUS"] = "1"
+    repo.write("notes.md", "synthetic change\n")
+    repo.git("add", "notes.md")
+    result = repo.git("commit", "-qm", "synthetic rejected message", allow_fail=True)
+    assert result.returncode != 0
+    assert repo.git("rev-parse", "HEAD").stdout == before
+    assert receipt.read_text(encoding="utf-8").splitlines() == ["called", "called"]
+
+
+def test_source2_future_visibility_cannot_downgrade_linkage(repo, tmp_path):
+    vis = write_visibility(tmp_path / "future.json", {
+        "example-owner/example-skill": "PUBLIC",
+        "example-owner/example-skill-config": "PRIVATE",
+    }, "2999-01-01T00:00:00Z")
+    notes = []
+    tokens = g.load_cross_repo_tokens(repo.root, str(vis), notes)
+    assert [(t.value, t.kind) for t in tokens] == [("example-skill-config", "linkage")]
+    assert "BLOCK" in sev_of("example-skill-config", g.Policy.of(tokens), "tree").values()
+    assert any("future" in note.lower() for note in notes)
+
+
+@pytest.mark.parametrize("relative", ["notes.md", "tools/pii_guard.py", "nested/[sample] résumé.md"])
+def test_source2_staged_denylist_survives_clean_worktree(repo, relative):
+    token = synthetic_token("staged-content")
+    repo.write(relative, "# safe\n")
+    repo.commit("synthetic baseline")
+    repo.write(relative, "# " + token + "\n")
+    repo.git("add", "--", relative)
+    repo.write(relative, "# safe\n")
+    out = g.scan_staged(repo.root, set(), g.Policy.of([g.Token(token, "secret")]))
+    assert any(value == token and severity == "BLOCK" for _, _, value, severity in out), out
+
+
+def test_source2_staged_added_plus_prefix_and_removal(repo):
+    token = synthetic_token("plus-prefix")
+    policy = g.Policy.of([g.Token(token, "secret")])
+    repo.write("notes.md", "safe\n")
+    repo.commit()
+    repo.write("notes.md", "++" + token + "\n")
+    repo.git("add", "notes.md")
+    assert any(value == token for _, _, value, _ in g.scan_staged(repo.root, set(), policy))
+    repo.git("commit", "-qm", "synthetic staged baseline")
+    repo.write("notes.md", "safe\n")
+    repo.git("add", "notes.md")
+    assert g.scan_staged(repo.root, set(), policy) == []
+
+
+def test_source2_staged_gitlink_needs_no_child_commit_object(repo):
+    repo.write("seed.md", "synthetic seed\n")
+    repo.commit()
+    repo.git("update-index", "--add", "--cacheinfo", "160000", "1234567890abcdef1234567890abcdef12345678", "deps/kit")
+    assert g.scan_staged(repo.root, set(), g.Policy.of([])) == []
+
+
+def test_source2_history_paths_are_nul_delimited(repo):
+    token = synthetic_token("nul-delimited-history")
+    path = " leading\n" + token + "\tentry.txt"
+    def pipe(*args, data):
+        result = subprocess.run(["git", *args], cwd=repo.root, env=repo.env, input=data,
+                                capture_output=True, text=True, encoding="utf-8")
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+    blob = pipe("hash-object", "-w", "--stdin", data="harmless\n")
+    tree = pipe("mktree", "-z", data="100644 blob %s\t%s\0" % (blob, path))
+    commit = pipe("commit-tree", tree, data="synthetic path fixture\n")
+    repo.git("update-ref", "HEAD", commit)
+    out = g.scan_history(repo.root, set(), g.Policy.of([g.Token(token, "secret")]))
+    assert any(path in where and value == token for where, _, value, _ in out), out
+
+
+@pytest.mark.parametrize("relative", ["notes.md", "tools/pii_guard.py"])
+def test_source2_native_hook_blocks_staged_bytes(repo, tmp_path, relative):
+    from pathlib import Path
+    import shutil
+    source = Path(GUARD).parent.parent
+    kit = tmp_path / "kit"
+    (kit / "hooks").mkdir(parents=True)
+    (kit / "tools").mkdir()
+    for name in ("hooks/pre-commit", "tools/pii_guard.py", "tools/data_boundary.py"):
+        shutil.copyfile(source / name, kit / name)
+    (kit / "hooks/pre-commit").chmod(0o755)
+    repo.git("remote", "remove", "origin")
+    repo.git("config", "core.hooksPath", str(kit / "hooks"))
+    token = synthetic_token("native-hook")
+    policy = write_policy(tmp_path / "hook-policy.json", token, g.CANARY_TOKEN)
+    repo.env["PII_DENYLIST"] = str(policy)
+    repo.write(".dataclass.json", json.dumps({"data": [], "fixture": [], "_audited": "synthetic tool"}))
+    repo.write(relative, "# safe\n")
+    repo.commit("synthetic hook baseline")
+    before = repo.git("rev-parse", "HEAD").stdout
+    repo.write(relative, "# " + token + "\n")
+    repo.git("add", "--", relative)
+    repo.write(relative, "# safe\n")
+    result = repo.git("commit", "-m", "synthetic blocked attempt", allow_fail=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "pre-commit BLOCKED by pii_guard" in result.stdout + result.stderr
+    assert repo.git("rev-parse", "HEAD").stdout == before
+    repo.write(relative, "# safe edited\n")
+    repo.git("add", "--", relative)
+    repo.git("commit", "-qm", "synthetic clean control")
+
+
+def test_source2_history_names_include_deleted_aliases(repo):
+    token = synthetic_token("historical-name")
+    policy = g.Policy.of([g.Token(token, "secret")])
+    paths = ["benign.md", "names/" + token + "/entry.md", "copies/" + token + ".txt"]
+    for relative in paths:
+        repo.write(relative, "same harmless body\n")
+    repo.commit("synthetic aliases")
+    repo.git("rm", "-r", "names", "copies")
+    repo.git("commit", "-qm", "synthetic removal")
+    assert g.scan_tree(repo.root, set(), policy) == []
+    out = g.scan_history(repo.root, set(), policy)
+    for relative in paths[1:]:
+        assert any(relative in where and value == token and severity == "BLOCK"
+                   for where, _, value, severity in out), out
+
+
+def test_source2_history_aliases_keep_body_policy_and_deduplicate(repo, monkeypatch):
+    for relative in ["tools/pii_guard.py", "plain.txt", "image.png"]:
+        repo.write(relative, "harmless shared content\n")
+    repo.commit("synthetic shared blob")
+    original = g.scan_text
+    body_calls = []
+    def record(text, where, *args, **kwargs):
+        if text == "harmless shared content\n":
+            body_calls.append((where, kwargs.get("deny_only", False)))
+        return original(text, where, *args, **kwargs)
+    monkeypatch.setattr(g, "scan_text", record)
+    stats = g._blank_history_stats()
+    g.scan_history(repo.root, set(), g.Policy.of([]), stats)
+    assert stats["blobs_total"] == stats["blobs_scanned"] == 1
+    assert len(body_calls) == 1 and body_calls[0][1] is False, body_calls
+
+
+@pytest.mark.parametrize("outcome", ["pass", "fail", "missing"])
+def test_source2_ci_boundary_step_executes_and_propagates(tmp_path, outcome):
+    from pathlib import Path
+    import shutil
+    action = Path(GUARD).parent.parent / "ci/pii-guard/action.yml"
+    blocks = action.read_text(encoding="utf-8").split("    - name:")
+    matches = [block for block in blocks if "test_data_boundary.py" in block]
+    assert len(matches) == 1, "CI must unconditionally run the boundary regression suite"
+    block = matches[0]
+    body = block.split("      run: |\n", 1)[1]
+    lines = []
+    for line in body.splitlines():
+        if line.strip() and not line.startswith("        "):
+            break
+        lines.append(line[8:])
+    consumer = tmp_path / "consumer"
+    write_ci_suite(consumer, outcome)
+    action_path = consumer / "guards/ci/pii-guard"
+    action_path.mkdir(parents=True)
+    if os.name == "nt":
+        bash = Path(shutil.which("git")).parent.parent / "bin/bash.exe"
+    else:
+        bash = Path(shutil.which("bash"))
+    assert bash.is_file(), "native Bash required to validate the CI run block"
+    env = dict(os.environ, GITHUB_ACTION_PATH=action_path.as_posix())
+    result = subprocess.run([str(bash), "--noprofile", "--norc", "-e", "-c", "\n".join(lines)],
+                            cwd=consumer, env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) is (outcome == "pass"), result.stdout + result.stderr
+    if outcome == "missing":
+        assert "::error::" in result.stdout + result.stderr
+    else:
+        assert ("1 passed" if outcome == "pass" else "1 failed") in result.stdout + result.stderr
 
 
 # ------------------------------------------------------------------ helpers
@@ -985,13 +1815,6 @@ def test_a_scanner_BASENAME_elsewhere_is_NOT_exempt_in_the_diff_domains(repo):
     dropped from the staged and range scans. Same shadow the tree domain had, same fix."""
     out = _stage_edit(repo, "docs/pii_guard.py")
     assert out and any(lab == "PERSONAL-MAILBOX" for _w, lab, _v, _s in out), out
-
-
-def test_the_exclusion_covers_every_scanner_path():
-    """Derived, not maintained by hand. A list that has to be kept in step with another list is a
-    list that will fall out of step with it, which is exactly what happened."""
-    for p in g.SCANNER_PATHS:
-        assert (":(exclude)" + p) in g.HISTORY_EXCLUDE
 
 
 @pytest.mark.parametrize("path,expect_finding", [

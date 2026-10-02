@@ -38,6 +38,159 @@ import subprocess
 import sys
 
 import pytest
+from make_fixtures import write_record, write_visibility
+from make_fixtures import write_invalid_git_marker
+from make_fixtures import write_ssh_config, make_ssh_layout
+from make_fixtures import declaration_name_cases, write_declaration_name_fixture
+
+
+@pytest.fixture
+def ssh_configuration(tmp_path, monkeypatch):
+    """Attestation tests consume only generated configuration; discovery is tested separately."""
+    import data_boundary as db
+    paths = [write_ssh_config(tmp_path / "ssh-home", "absent"),
+             write_ssh_config(tmp_path / "ssh-system", "absent", "ssh/ssh_config"),
+             write_ssh_config(tmp_path / "ssh-git", "absent", "etc/ssh/ssh_config")]
+    monkeypatch.setattr(db, "_ssh_config_paths", lambda: [str(path) for path in paths])
+    return paths
+
+
+@pytest.mark.parametrize("variant", ["absent", "identity", "canonical", "unrelated", "remap", "wildcard",
+                                     "include", "match-exec", "proxy", "canonicalize", "port"])
+def test_source5_ssh_configuration_destinations(tmp_path, monkeypatch, variant, ssh_configuration):
+    import data_boundary as db
+    companion, receipt = _companion_case(tmp_path, "git@github.com:example-owner/demo-config.git")
+    if variant != "absent":
+        write_ssh_config(ssh_configuration[0].parent.parent, variant)
+    original = subprocess.run
+    def git_only(args, *positional, **kwargs):
+        from pathlib import Path
+        assert Path(str(args[0])).name.lower() in {"git", "git.exe"}, "Attestation executed a transport command"
+        return original(args, *positional, **kwargs)
+    monkeypatch.setattr(subprocess, "run", git_only)
+    proven, errors = db._companion_visibility(str(companion), str(receipt))
+    allowed = variant in {"absent", "identity", "canonical", "unrelated"}
+    assert bool(errors) is not allowed, errors
+    assert proven == (["example-owner/demo-config"] if allowed else [])
+
+
+@pytest.mark.parametrize("override", ["GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_CONFIG_COUNT",
+                                      "core.sshCommand", "ssh.variant", "remote.origin.vcs",
+                                      "remote.origin.uploadpack", "remote.origin.receivepack"])
+def test_source5_ssh_transport_overrides_are_unknown(tmp_path, monkeypatch, override):
+    import data_boundary as db
+    companion, receipt = _companion_case(tmp_path, "ssh://git@github.com/example-owner/demo-config.git")
+    if override == "GIT_CONFIG_COUNT":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "synthetic-command-that-must-never-run")
+    elif override.startswith("GIT_"):
+        monkeypatch.setenv(override, "synthetic-command-that-must-never-run")
+    else:
+        git(companion, "config", override, "synthetic-command-that-must-never-run")
+    proven, errors = db._companion_visibility(str(companion), str(receipt))
+    assert errors and proven == []
+
+
+@pytest.mark.parametrize("client", ["system", "git", "unknown", "missing", "missing-profile"])
+def test_source6_ssh_default_configuration_discovery(tmp_path, monkeypatch, client):
+    import data_boundary as db
+    import shutil
+    layout = make_ssh_layout(tmp_path / "ssh-discovery")
+    for variable, name in (("HOME", "environment-home"), ("USERPROFILE", "userprofile"),
+                           ("SystemRoot", "windows"), ("ProgramData", "program-data")):
+        monkeypatch.setenv(variable, str(layout[name]))
+    monkeypatch.setattr(db, "_ssh_profile_home", lambda: None if client == "missing-profile"
+                        else str(layout["account-home"]))
+    monkeypatch.setattr(os.path, "expanduser", lambda path: str(layout["expanded-home"]))
+    system_client = (str(layout["windows"] / "System32/OpenSSH/ssh.exe") if os.name == "nt"
+                     else "/usr/bin/ssh")
+    selected = {"system": system_client, "git": str(layout["git-installation"] / "usr/bin/ssh.exe"),
+                "unknown": str(tmp_path / "unknown/ssh"), "missing": None,
+                "missing-profile": system_client}[client]
+    executables = {"ssh": selected, "git": str(layout["git-installation"] / "bin/git.exe")}
+    monkeypatch.setattr(shutil, "which", lambda command: executables[command])
+    paths = db._ssh_config_paths()
+    if client != "system" and not (client == "git" and os.name == "nt"):
+        assert paths is None
+        return
+    expected = {str(layout[name] / ".ssh/config") for name in
+                ("environment-home", "userprofile", "account-home", "expanded-home")}
+    if os.name == "nt":
+        expected.update([str(layout["program-data"] / "ssh/ssh_config"),
+                         str(layout["git-installation"] / "etc/ssh/ssh_config")])
+    else:
+        expected.add("/etc/ssh/ssh_config")
+    assert set(paths) == expected
+
+
+@pytest.mark.parametrize("location", [0, 1, 2])
+def test_source6_ssh_include_is_unknown_in_every_location(tmp_path, ssh_configuration, location):
+    import data_boundary as db
+    target = ssh_configuration[location]
+    write_ssh_config(target.parent, "include", target.name)
+    companion, receipt = _companion_case(tmp_path, "git@github.com:example-owner/demo-config.git")
+    proven, errors = db._companion_visibility(str(companion), str(receipt))
+    assert errors and proven == []
+    assert "Include or Match" in errors[0]
+
+
+@pytest.mark.parametrize("remote", ["SSH://git@github.com/example-owner/demo-config.git",
+                                    " ssh://git@github.com/example-owner/demo-config.git",
+                                    "ssh://git@github.com:0/example-owner/demo-config.git",
+                                    "ssh://git@github.com:/example-owner/demo-config.git"])
+def test_source5_ssh_noncanonical_protocol_is_unknown(tmp_path, remote):
+    import data_boundary as db
+    assert db._github_repo_key(remote) is None
+    companion, receipt = _companion_case(tmp_path, remote)
+    proven, errors = db._companion_visibility(str(companion), str(receipt))
+    assert errors and proven == []
+
+
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_source5_ssh_rewrites_require_destination_attestation(tmp_path, rewrite, ssh_configuration):
+    import data_boundary as db
+    companion, receipt = _companion_case(tmp_path)
+    write_ssh_config(ssh_configuration[0].parent.parent, "remap")
+    if rewrite:
+        git(companion, "config", "url.git@github.com:.insteadOf", "https://github.com/")
+    proven, errors = db._companion_visibility(str(companion), str(receipt))
+    assert bool(errors) is rewrite
+    assert proven == ([] if rewrite else ["example-owner/demo-config"])
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+@pytest.mark.parametrize("directory", ["runs", "nested/runs"])
+def test_source3_invalid_git_marker_cannot_hide_physical_output(tmp_path, ignored, directory):
+    repo = make_repo(tmp_path, manifest=base_manifest(),
+                     files={".gitignore": directory + "/\n" if ignored else ""})
+    write_record(repo, directory + "/events.jsonl")
+    write_invalid_git_marker(repo, directory)
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, directory + "/events.jsonl", "RUN-SHAPE")
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_source3_outside_resolver_cannot_import_consumer_fallback(tmp_path, monkeypatch, registered):
+    import data_boundary as db
+    repo = make_repo(tmp_path, manifest=base_manifest())
+    if registered:
+        (repo / ".gitmodules").write_text('[submodule "security"]\npath = guards\n'
+                                          'url = https://github.com/DaizeDong/fleet-guards.git\n', encoding="utf-8")
+        git(repo, "add", ".gitmodules")
+        git(repo, "update-index", "--add", "--cacheinfo", "160000",
+            "1234567890abcdef1234567890abcdef12345678", "guards")
+        (repo / "guards").mkdir()
+    (repo / "tools").mkdir()
+    sentinel = tmp_path / "imported.txt"
+    (repo / "tools/datadir.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['FG_SYNTHETIC_RECEIPT']).write_text('imported')\n"
+        "def resolve_data_dir(skill):\n    return None\n", encoding="utf-8")
+    monkeypatch.setenv("FG_SYNTHETIC_RECEIPT", str(sentinel))
+    with pytest.raises(RuntimeError):
+        db._resolve_companion(str(repo))
+    assert not sentinel.exists()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GUARD = os.path.join(HERE, "data_boundary.py")
@@ -75,7 +228,7 @@ def git(repo, *args):
     return p.stdout
 
 
-def run_guard(repo, *args, env_extra=None, path=None):
+def run_guard(repo, *args, env_extra=None, path=None, guard_path=None):
     """Invoke the real script exactly as CI and the hooks do, and return (rc, combined output)."""
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -83,7 +236,7 @@ def run_guard(repo, *args, env_extra=None, path=None):
         env["PATH"] = path
     if env_extra:
         env.update(env_extra)
-    p = subprocess.run([sys.executable, GUARD, "--repo", str(repo), *args],
+    p = subprocess.run([sys.executable, str(guard_path or GUARD), "--repo", str(repo), *args],
                        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
@@ -116,6 +269,61 @@ def base_manifest(**over):
     m = {"data": [], "data_sealed": [], "fixture": [], "tool": [], "_audited": AUDITED}
     m.update(over)
     return m
+
+
+def native_submodule_layout(tmp_path, relative, linked=False, resolver=False):
+    """Generate an actual local submodule, optionally in a linked consumer worktree."""
+    from pathlib import Path
+    import shutil
+    source = make_repo(tmp_path, name="module-source", files={"seed.md": "synthetic module\n"},
+                       manifest=base_manifest())
+    if resolver:
+        (source / "tools").mkdir()
+        shutil.copyfile(Path(HERE) / "datadir.py", source / "tools/datadir.py")
+        git(source, "add", "tools/datadir.py")
+    identity = ["-c", "user.name=Fixture", "-c", "user.email=fixture@users.noreply.github.com"]
+    git(source, *identity, "commit", "-qm", "synthetic module")
+    repo = make_repo(tmp_path, name="consumer", manifest=base_manifest())
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "--name", "security", str(source), relative)
+    git(repo, *identity, "commit", "-qm", "synthetic consumer")
+    if linked:
+        worktree = tmp_path / "linked-consumer"
+        git(repo, "worktree", "add", "--detach", str(worktree))
+        repo = worktree
+        git(repo, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
+    git(repo, "config", "--file", ".gitmodules", "submodule.security.url",
+        "https://github.com/DaizeDong/fleet-guards.git" if resolver else "https://github.com/example-owner/example-module.git")
+    git(repo, "add", ".gitmodules")
+    return repo, repo / relative
+
+
+@pytest.mark.parametrize("relative", ["unlisted-kit", "vendor/security"])
+@pytest.mark.parametrize("linked", [False, True])
+def test_source3_real_submodules_preserve_boundary_and_pii_scope(tmp_path, relative, linked):
+    import pii_guard as guard
+    from make_fixtures import synthetic_token
+    repo, module = native_submodule_layout(tmp_path, relative, linked)
+    write_record(module, "runs/events.jsonl")
+    token = synthetic_token("submodule-owned-content")
+    (module / "notes.txt").write_text(token + "\n", encoding="utf-8")
+    git(module, "add", "notes.txt")
+    rc, out = run_guard(repo)
+    assert rc == CLEAN, out
+    policy = guard.Policy.of([guard.Token(token, "secret")])
+    assert guard.scan_tree(str(repo), set(), policy) == []
+    assert any(value == token for _, _, value, _ in guard.scan_tree(str(module), set(), policy))
+    rc, out = run_guard(module)
+    assert_blocked(rc, out, "runs/events.jsonl", "RUN-SHAPE")
+
+
+@pytest.mark.parametrize("relative", ["security-kit", "vendor/security"])
+def test_source3_resolver_uses_registered_native_kit(tmp_path, monkeypatch, relative):
+    import data_boundary as db
+    repo, _module = native_submodule_layout(tmp_path, relative, resolver=True)
+    store = tmp_path / "private-store"
+    (store / "data").mkdir(parents=True)
+    monkeypatch.setenv("CONSUMER_CONFIG", str(store))
+    assert os.path.realpath(db._resolve_companion(str(repo))) == os.path.realpath(store / "data")
 
 
 def assert_not_a_pass(out):
@@ -310,59 +518,240 @@ def test_check1_data_sealed_path_may_not_come_back(tmp_path):
     assert_blocked(rc, out, "metrics/live-runs.jsonl", "DATA-TRACKED")
 
 
-def test_check1_over_rejection_untracked_data_path_passes(tmp_path):
-    """The rule is about the INDEX. A DATA path present in the work tree but not staged is the
-    normal, correct state on an operator's machine and must not be a violation."""
+@pytest.mark.parametrize("ignored", [False, True])
+def test_check1_untracked_data_path_is_blocked(tmp_path, ignored):
+    """DATA is physically absent from a tool repo, including ignored files."""
     m = base_manifest(data=["archive/opportunities.jsonl"])
     repo = make_repo(tmp_path, files={"archive/opportunities.jsonl.example": '{"id": "..."}\n'},
                      manifest=m)
-    (repo / "archive" / "opportunities.jsonl").write_text('{"id": "op-a"}\n', encoding="utf-8")
+    write_record(repo, "archive/opportunities.jsonl")
+    if ignored:
+        (repo / ".gitignore").write_text("archive/*.jsonl\n", encoding="utf-8")
     rc, out = run_guard(repo)
-    assert rc == CLEAN, "an unstaged DATA file is not a leak:\n%s" % out
+    assert_blocked(rc, out, "archive/opportunities.jsonl", "DATA-PRESENT")
+    assert_not_a_pass(out)
 
 
-def test_summary_does_not_claim_absent_when_the_file_is_on_disk(tmp_path):
-    """The success line used to say "N DATA paths absent" without ever stating the filesystem.
-
-    Measured 2026-09-04: files sat on disk at declared DATA paths in several
-    repos, and each of them printed that those paths were absent. The rule itself is right (the INDEX is
-    what publishes), so the file's presence is NOT a violation and the test above pins that.
-    This pins the other half: the sentence must not assert something the run never checked.
-    """
+def test_summary_only_claims_absent_when_data_is_absent(tmp_path):
     m = base_manifest(data=["archive/opportunities.jsonl"])
     repo = make_repo(tmp_path, files={"archive/opportunities.jsonl.example": '{"id": "..."}\n'},
                      manifest=m)
-    (repo / "archive" / "opportunities.jsonl").write_text('{"id": "op-a"}\n', encoding="utf-8")
     rc, out = run_guard(repo)
     assert rc == CLEAN, out
-    assert "absent" not in out, (
-        "the file is on disk; claiming the path is absent is worse than saying nothing, "
-        "because the reader stops looking:\n%s" % out)
-    assert "present in the worktree" in out, (
-        "a present DATA file must be counted in the summary, or the number nobody sees is "
-        "the number nobody acts on:\n%s" % out)
+    assert "absent from the worktree" in out, out
 
 
-def test_summary_says_when_a_present_data_file_is_not_ignored(tmp_path):
-    """Present-and-ignored and present-and-unignored are different distances from publication.
+@pytest.mark.parametrize("declaration,relative", [
+    ("archive/", "archive/nested/record.jsonl"),
+    ("guards/records/", "guards/records/record.jsonl"),
+    ("style/records/", "style/records/record.jsonl"),
+    (".venv/records/", ".venv/records/record.jsonl"),
+    ("archive/*.jsonl", "archive/.hidden.jsonl"),
+])
+def test_physical_data_declarations_cover_directories_and_globs(tmp_path, declaration, relative):
+    repo = make_repo(tmp_path, manifest=base_manifest(data_sealed=[declaration]))
+    write_record(repo, relative)
+    rc, out = run_guard(repo)
+    assert rc == VIOLATION, out
+    assert "DATA-PRESENT" in out, out
+    assert declaration.rstrip("/").split("*")[0] in out, out
+    assert_not_a_pass(out)
 
-    Neither is a violation -- the commit-time index check is what stops publication -- but one of
-    them is a single `git add .` away from being staged, and collapsing the two into one number
-    hides exactly the case worth glancing at.
-    """
-    m = base_manifest(data=["archive/opportunities.jsonl"])
-    repo = make_repo(tmp_path, files={"archive/opportunities.jsonl.example": '{"id": "..."}\n'},
-                     manifest=m)
-    (repo / "archive" / "opportunities.jsonl").write_text('{"id": "op-a"}\n', encoding="utf-8")
+
+def test_physical_sealed_directory_cannot_return_empty(tmp_path):
+    repo = make_repo(tmp_path, manifest=base_manifest(data_sealed=["archive/"]))
+    (repo / "archive").mkdir()
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, "archive", "DATA-PRESENT")
+
+
+@pytest.mark.parametrize("declaration", ["./private-store/", "private-store//", "private-store/./"])
+def test_source2_noncanonical_data_declarations_cannot_bypass(tmp_path, declaration):
+    repo = make_repo(tmp_path, manifest=base_manifest(data_sealed=[declaration]))
+    write_record(repo, "private-store/item.json")
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, "private-store", "DATA-PATH")
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+def test_source2_physical_undeclared_run_shape(tmp_path, ignored):
+    repo = make_repo(tmp_path, manifest=base_manifest(),
+                     files={".gitignore": "metrics/\n" if ignored else ""})
+    write_record(repo, "metrics/live-runs.jsonl")
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, "metrics/live-runs.jsonl", "RUN-SHAPE")
+
+
+def test_source2_physical_tool_exemption_survives(tmp_path):
+    repo = make_repo(tmp_path, manifest=base_manifest(tool=["metrics/live-runs.jsonl"]))
+    write_record(repo, "metrics/live-runs.jsonl")
     rc, out = run_guard(repo)
     assert rc == CLEAN, out
-    assert "NOT ignored" in out, "no .gitignore covers it, so the summary must say so:\n%s" % out
 
-    (repo / ".gitignore").write_text("archive/*.jsonl\n", encoding="utf-8")
-    rc2, out2 = run_guard(repo)
-    assert rc2 == CLEAN, out2
-    assert "NOT ignored" not in out2, "now it is ignored; the sentence must follow:\n%s" % out2
-    assert "present in the worktree but ignored" in out2, out2
+
+def _companion_case(tmp_path, remote="https://github.com/example-owner/demo-config.git"):
+    import datetime
+    companion = make_repo(tmp_path, name="demo-config", remote=remote)
+    write_record(companion, "archive/record.jsonl")
+    git(companion, "add", "archive/record.jsonl")
+    receipt = write_visibility(tmp_path / "visibility.json", {
+        "example-owner/demo-config": "PRIVATE",
+        "example-owner/public-copy": "PUBLIC",
+    }, datetime.datetime.now(datetime.timezone.utc).isoformat())
+    return companion, receipt
+
+
+def test_private_companion_keeps_versioned_data(tmp_path):
+    companion, receipt = _companion_case(tmp_path)
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert rc == CLEAN, out
+    assert "PRIVATE" in out and "example-owner/demo-config" in out, out
+    assert "archive/record.jsonl" in git(companion, "ls-files")
+    assert (companion / "archive" / "record.jsonl").is_file()
+
+
+@pytest.mark.parametrize("mode", ["explicit", "resolver"])
+@pytest.mark.parametrize("visibility", ["public-copy", "unknown"])
+def test_source2_companion_attests_actual_nested_data_repo(tmp_path, mode, visibility):
+    from pathlib import Path
+    import shutil
+    companion, receipt = _companion_case(tmp_path)
+    nested = make_repo(companion, name="data", remote="https://github.com/example-owner/%s.git" % visibility)
+    write_record(nested, "archive/record.jsonl")
+    git(nested, "add", "archive/record.jsonl")
+    # The parent ignores the nested store, so only destination attestation can catch this.
+    (companion / ".gitignore").write_text("data/\n", encoding="utf-8")
+    git(companion, "add", ".gitignore")
+    if mode == "explicit":
+        repo, args, env = companion, ["--companion-dir", str(companion)], {}
+    else:
+        repo = make_repo(tmp_path, name="demo", manifest=base_manifest())
+        (repo / "tools").mkdir()
+        for name in ("datadir.py", "data_boundary.py", "pii_guard.py"):
+            shutil.copyfile(Path(HERE) / name, repo / "tools" / name)
+        git(repo, "add", "tools")
+        args, env = ["--companion"], {"DEMO_CONFIG": str(companion)}
+    rc, out = run_guard(repo, *args, "--visibility-map", str(receipt), env_extra=env,
+                        guard_path=repo / "tools/data_boundary.py" if mode == "resolver" else None)
+    assert_blocked(rc, out, visibility, "VISIBILITY")
+
+
+def test_source2_companion_attests_redirected_data_destination(tmp_path):
+    companion, receipt = _companion_case(tmp_path)
+    target = make_repo(tmp_path, name="redirected",
+                       remote="https://github.com/example-owner/public-copy.git")
+    write_record(target, "archive/record.jsonl")
+    git(target, "add", "archive/record.jsonl")
+    link = companion / "data"
+    if os.name == "nt":
+        result = subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        link.symlink_to(target, target_is_directory=True)
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert_blocked(rc, out, "public-copy", "VISIBILITY")
+
+
+def test_source2_private_nested_data_repo_is_legitimate(tmp_path):
+    companion, receipt = _companion_case(tmp_path)
+    nested = make_repo(companion, name="data", remote="https://github.com/example-owner/demo-config.git")
+    write_record(nested, "archive/record.jsonl")
+    git(nested, "add", "archive/record.jsonl")
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert rc == CLEAN, out
+    assert "PRIVATE verified: example-owner/demo-config" in out
+    assert "verified DATA destination:" in out
+
+
+@pytest.mark.parametrize("remote", [
+    None,
+    "https://github.com/example-owner/public-copy.git",
+    "https://github.com/example-owner/unknown.git",
+    "https://example.invalid/example-owner/demo-config.git",
+])
+def test_companion_public_or_unknown_remote_is_blocked(tmp_path, remote):
+    companion, receipt = _companion_case(tmp_path, remote)
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert_blocked(rc, out, "companion", "VISIBILITY")
+    assert "correct: this is the private repo" not in out, out
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("remote.origin.pushurl", "https://github.com/example-owner/public-copy.git"),
+    ("url.https://github.com/example-owner/public-copy.git.pushInsteadOf",
+     "https://github.com/example-owner/demo-config.git"),
+    ("remote.backup.url", "https://github.com/example-owner/public-copy.git"),
+])
+def test_companion_checks_all_effective_push_destinations(tmp_path, setting, value):
+    companion, receipt = _companion_case(tmp_path)
+    git(companion, "config", setting, value)
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert_blocked(rc, out, "example-owner/public-copy", "VISIBILITY")
+
+
+@pytest.mark.parametrize("stamp", [None, "invalid", "2000-01-01T00:00:00Z", "2999-01-01T00:00:00Z"])
+def test_companion_cannot_rely_on_an_undated_stale_or_future_receipt(tmp_path, stamp):
+    companion, receipt = _companion_case(tmp_path)
+    write_visibility(receipt, {"example-owner/demo-config": "PRIVATE"}, stamp)
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert_blocked(rc, out, "companion", "VISIBILITY")
+
+
+@pytest.mark.parametrize("contents", [None, "{broken", "[]", "{}"])
+def test_companion_missing_or_damaged_receipt_is_blocked(tmp_path, contents):
+    companion, receipt = _companion_case(tmp_path)
+    if contents is None:
+        receipt.unlink()
+    else:
+        receipt.write_text(contents, encoding="utf-8")
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert_blocked(rc, out, "companion", "VISIBILITY")
+
+
+def test_companion_checks_every_pushurl(tmp_path):
+    companion, receipt = _companion_case(tmp_path)
+    git(companion, "config", "--add", "remote.origin.pushurl", "https://github.com/example-owner/demo-config.git")
+    git(companion, "config", "--add", "remote.origin.pushurl", "https://github.com/example-owner/public-copy.git")
+    rc, out = run_guard(companion, "--companion-dir", str(companion), "--visibility-map", str(receipt))
+    assert_blocked(rc, out, "example-owner/public-copy", "VISIBILITY")
+
+
+@pytest.mark.parametrize("remote", [
+    "git@github.com:example-owner/demo-config.git",
+    "ssh://git@github.com/example-owner/demo-config.git",
+])
+def test_private_companion_supports_canonical_ssh_urls(tmp_path, remote, ssh_configuration):
+    import data_boundary as db
+    companion, receipt = _companion_case(tmp_path, remote)
+    proven, errors = db._companion_visibility(str(companion), str(receipt))
+    assert errors == []
+    assert proven == ["example-owner/demo-config"]
+
+
+def test_physical_data_is_blocked_even_if_tool_remote_is_private(tmp_path):
+    repo = make_repo(tmp_path, remote="https://github.com/example-owner/demo-config.git",
+                     manifest=base_manifest(data_sealed=["archive/"]))
+    write_record(repo, "archive/record.jsonl")
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, "archive", "DATA-PRESENT")
+
+
+def test_data_glob_staged_but_deleted_from_disk_still_blocks(tmp_path):
+    repo = make_repo(tmp_path, manifest=base_manifest(data_sealed=["storage/*.json"]))
+    record = write_record(repo, "storage/item.json")
+    git(repo, "add", "storage/item.json")
+    record.unlink()
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, "storage/item.json", "DATA-TRACKED")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows paths compare without case")
+def test_physical_data_declaration_respects_windows_case(tmp_path):
+    repo = make_repo(tmp_path, manifest=base_manifest(data_sealed=["ARCHIVE/RECORD.JSONL"]))
+    write_record(repo, "archive/record.jsonl")
+    rc, out = run_guard(repo)
+    assert_blocked(rc, out, "archive/record.jsonl", "DATA-PRESENT")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -507,6 +896,19 @@ def test_check2_over_rejection_a_generated_fixture_passes(tmp_path):
     assert "1 FIXTUREs generator-reproducible" in out, out
 
 
+def test_source2_untracked_generated_run_shaped_fixture_is_exempt(tmp_path):
+    repo = make_repo(tmp_path, files={"tools/make_fixtures.py": FAKE_GEN},
+                     manifest=base_manifest(fixture=["runs/sample.json"]))
+    destination = repo / "runs"
+    destination.mkdir()
+    generated = subprocess.run([sys.executable, str(repo / "tools/make_fixtures.py"),
+                                "--out", str(destination)], capture_output=True, text=True)
+    assert generated.returncode == 0, generated.stderr
+    rc, out = run_guard(repo)
+    assert rc == CLEAN, out
+    assert "1 FIXTUREs generator-reproducible" in out
+
+
 def test_check2_crlf_is_not_a_hand_edit(tmp_path):
     """Windows checkouts rewrite line endings. If that read as a hand-edited fixture, the gate
     would be red on every clone on this operator's own machine, and a permanently red gate gets
@@ -648,36 +1050,61 @@ def test_clean_and_not_examined_do_not_share_an_exit_code(tmp_path):
 
 
 def test_resolver_lookup_prefers_the_submodule_over_a_copy_beside_this_file(tmp_path, monkeypatch):
-    """The kit became a submodule, so a consumer's resolver lives at guards/tools/datadir.py.
+    import data_boundary as db
+    repo, _module = native_submodule_layout(tmp_path, "guards", resolver=True)
+    store = tmp_path / "synthetic-store"
+    store.mkdir()
+    monkeypatch.setenv("CONSUMER_CONFIG", str(store))
+    (repo / "tools").mkdir()
+    (repo / "tools/datadir.py").write_text("raise RuntimeError('stale consumer resolver imported')\n", encoding="utf-8")
+    assert os.path.realpath(db._resolve_companion(str(repo))) == os.path.realpath(store)
 
-    The lookup asked only for tools/datadir.py, missed, and fell through to whatever datadir.py sat
-    beside data_boundary.py. Inside a consumer those two are the same file, so nothing looked
-    wrong; run from a checkout OUTSIDE the repo under audit it silently loads that other copy.
-    A stale resolver is the one component whose wrongness is invisible: it returns a path, and
-    every caller believes it.
 
-    Poisoned rather than asserted. The two candidate files return different sentinel values, so
-    the test can only pass by loading the right one.
-    """
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("_db_under_test", GUARD)
-    db = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(db)
+@pytest.mark.parametrize("key", ["data", "data_sealed", "fixture", "tool"])
+@pytest.mark.parametrize("declaration", [
+    pytest.param(path, id=label) for label, path in declaration_name_cases()["ambiguous"]
+])
+def test_source9_windows_alias_declarations_are_rejected(key, declaration):
+    import data_boundary as db
+    findings = []
+    db.validate_declarations({key: [declaration]}, findings)
+    assert [(kind, path) for kind, path, _reason in findings] == [("DATA-PATH", declaration)]
 
-    repo = tmp_path / "consumer"
-    (repo / "guards" / "tools").mkdir(parents=True)
-    (repo / ".git").mkdir()
-    # The submodule copy: the one that must win.
-    (repo / "guards" / "tools" / "datadir.py").write_text(
-        "def resolve_companion_root(skill):\n    return 'FROM-SUBMODULE'\n", encoding="utf-8")
-    # A decoy beside the tool itself, standing in for a machine-level checkout's stale fork.
-    outside = tmp_path / "machine-level"
-    outside.mkdir()
-    (outside / "datadir.py").write_text(
-        "def resolve_companion_root(skill):\n    return 'FROM-STALE-FORK'\n", encoding="utf-8")
-    monkeypatch.setattr(db, "__file__", str(outside / "data_boundary.py"))
-    monkeypatch.setattr(db, "_repo_root", lambda start: str(repo))
 
-    got = db._resolve_companion(str(repo))
-    assert got == "FROM-SUBMODULE", (
-        "loaded the copy beside the tool instead of the repo's own submodule resolver: %r" % got)
+@pytest.mark.parametrize("key", ["data", "data_sealed", "fixture", "tool"])
+@pytest.mark.parametrize("declaration", [
+    pytest.param(path, id=label) for label, path in declaration_name_cases()["canonical"]
+])
+def test_source9_canonical_declarations_remain_valid(key, declaration):
+    import data_boundary as db
+    findings = []
+    db.validate_declarations({key: [declaration]}, findings)
+    assert findings == []
+
+
+@pytest.mark.parametrize("key", ["data", "data_sealed"])
+@pytest.mark.parametrize("level", ["directory", "leaf"])
+@pytest.mark.parametrize("suffix", [pytest.param(".", id="dot"), pytest.param(" ", id="space")])
+@pytest.mark.parametrize("presence", ["physical", "index-only", "absent"])
+@pytest.mark.parametrize("aliased", [False, True], ids=["canonical", "alias"])
+def test_source9_cli_declarations_cannot_hide_data(tmp_path, key, level, suffix, presence, aliased):
+    repo = make_repo(tmp_path, manifest=base_manifest())
+    declaration, relative, record = write_declaration_name_fixture(
+        repo, key, level, suffix, aliased, present=presence != "absent")
+    if presence == "index-only":
+        git(repo, "add", relative)
+        record.unlink()
+    elif presence == "physical" and aliased and os.name == "nt":
+        canonical = record.parent if level == "directory" else record
+        assert os.path.samefile(canonical, repo / declaration.rstrip("/"))
+    rc, out = run_guard(repo)
+    if aliased:
+        assert_blocked(rc, out, declaration, "DATA-PATH")
+        assert_not_a_pass(out)
+    elif presence == "absent":
+        assert rc == CLEAN, out
+    else:
+        kind = "DATA-TRACKED" if presence == "index-only" else "DATA-PRESENT"
+        target = declaration.rstrip("/") if presence == "physical" else relative
+        assert_blocked(rc, out, target, kind)
+        assert_not_a_pass(out)

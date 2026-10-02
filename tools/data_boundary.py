@@ -40,10 +40,10 @@ CHANGELOG from memory. No boundary reaches that; deleting a file does not make a
 is what pii_guard is FOR, and it is why it stays -- demoted from primary control to backstop.
 
 CHECKS
-  1. no DATA-class path is git-tracked                       (the door)
+  1. no DATA-class path is git-tracked or physically present in the tool worktree
   2. every FIXTURE path is byte-identical to what tools/make_fixtures.py produces  (the copy-paste)
   3. every DATA path has a `<path>.example` schema in the repo (so the tool is usable uninitialized)
-  4. no git-tracked file has the SHAPE of real-run output unless it is declared  (the empty manifest)
+  4. no tracked or physically present path has an undeclared real-run output shape
 
 `data_sealed` is a fourth, narrower declaration: a path that USED to hold real data, has been
 purged, and must stay dead. Checked like DATA in (1), exempt from (3) -- a dead path is not owed a
@@ -73,9 +73,11 @@ reason. That is an allowlist entry visible in the diff, which is the opposite of
 Stdlib only.
 """
 import argparse
+import fnmatch
 import importlib.util
 import json
 import os
+import ntpath
 import re
 import subprocess
 import sys
@@ -167,7 +169,7 @@ class GitError(RuntimeError):
     """
 
 
-def _run(args, cwd):
+def _run(args, cwd, env=None):
     """Run a git command and return its stdout.
 
     THIS USED TO FAIL OPEN, and on the PRIMARY control that is worse than on the backstop.
@@ -192,9 +194,11 @@ def _run(args, cwd):
     a repo path containing non-ASCII into mojibake. The `git ls-files` that follows then
     runs in a directory that does not exist.
     """
+    environment = dict(os.environ if env is None else env)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", env=environment)
     except (OSError, ValueError) as e:
         raise GitError("cannot execute `%s` in %s: %s\n"
                        "  git must be runnable for this check to mean anything."
@@ -242,9 +246,72 @@ def tracked(root):
     return {p for p in _run(["git", "ls-files", "-z"], root).split("\0") if p}
 
 
+def gitlinks(root):
+    """Return submodule paths and object IDs recorded by the parent index."""
+    result = {}
+    for entry in _run(["git", "ls-files", "--stage", "-z"], root).split("\0"):
+        if entry:
+            metadata, path = entry.split("\t", 1)
+            mode, sha, stage = metadata.split()
+            if mode == "160000" and stage == "0":
+                result[path] = sha
+    return result
+
+
 def _covered(rel, pats):
     """Is `rel` the declared path itself, or under it when the declaration names a directory?"""
     return any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in pats)
+
+
+def _data_covered(rel, patterns):
+    return any(fnmatch.fnmatch(rel, p.rstrip("/"))
+               or fnmatch.fnmatch(rel, p.rstrip("/") + "/*") for p in patterns)
+
+
+def validate_declarations(m, out):
+    """Require one spelling before any declaration is used by any check."""
+    for key in ("data", "data_sealed", "fixture", "tool"):
+        values = m.get(key, [])
+        if not isinstance(values, list):
+            out.append(("DATA-PATH", MANIFEST, "%s must be a list of relative paths" % key))
+            continue
+        for value in values:
+            path = value[:-1] if isinstance(value, str) and value.endswith("/") else value
+            if (not isinstance(path, str) or not path or "\\" in path
+                    or ntpath.splitdrive(path)[0] or path.startswith("/")
+                    or any(part in ("", ".", "..") or part.endswith((".", " "))
+                           for part in path.split("/"))):
+                out.append(("DATA-PATH", str(value),
+                            "%s declarations require canonical repository-relative paths" % key))
+
+
+def physical_paths(root):
+    """Enumerate files and links without reading contents or entering linked trees.
+
+    Ordinary container directories are not additional run artifacts. Declared DATA directories
+    have their own absence check, including empty directories.
+    """
+    def scan_error(error):
+        raise error
+
+    submodules = gitlinks(root)
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=scan_error):
+        descend = []
+        for name in sorted(dirs + files):
+            if name == ".git":
+                continue
+            path = os.path.join(directory, name)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if name in dirs:
+                info = os.lstat(path)
+                linked = os.path.islink(path) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+                if linked:
+                    yield rel + "/"
+                elif rel not in submodules:
+                    descend.append(name)
+            else:
+                yield rel
+        dirs[:] = descend
 
 
 def check_data_not_tracked(root, m, files, out):
@@ -259,53 +326,62 @@ def check_data_not_tracked(root, m, files, out):
     """
     pats = m.get("data", []) + m.get("data_sealed", [])
     for rel in sorted(files):
-        if _covered(rel, pats):
+        if _data_covered(rel, pats):
             out.append(("DATA-TRACKED", rel,
                         "real-run output must live in the private companion config, not here"))
 
 
-def check_data_absent_from_worktree(root, m):
-    """Are the declared DATA paths actually ABSENT, or merely untracked?
+def check_data_absent_from_worktree(root, m, out):
+    """Declared DATA must be absent, including ignored files and sealed directories.
 
-    check_data_not_tracked reads the INDEX, and that is the right rule: a DATA file sitting
-    unstaged in an operator's work tree is the NORMAL state while a skill runs, and `git add .`
-    followed by a commit is already stopped by that check at the moment it would matter. Making
-    presence itself a violation is over-rejection, and there is a test named for it.
-
-    What was wrong was not the rule, it was the SENTENCE. Nothing here ever looked at the
-    filesystem, and the success line said "%d DATA + %d sealed paths absent". Measured 2026-09-04: files existed
-    on disk at declared DATA paths in several repos, every one of which printed that those
-    paths were absent.
-
-    A gate that says nothing about a file leaves the reader with no belief. A gate that positively
-    asserts the file is not there leaves them with a WRONG one, and they do not go and look. So
-    this counts, and the summary says the number.
-
-    Returns (present, present_and_not_ignored). The second is not a violation; it is the subset one
-    `git add .` away from being staged, which is worth seeing in the sentence rather than inferring.
+    Inspect names only. Literal prefixes prune unrelated trees without exempting directory
+    names such as guards/ or .venv/. Never follow a link into a possible data store.
     """
-    pats = list(m.get("data", [])) + list(m.get("data_sealed", []))
+    pats = [p.rstrip("/") for p in m.get("data", []) + m.get("data_sealed", [])]
     if not pats:
-        return (0, 0)
-    import fnmatch
-    present = unignored = 0
-    skip = {".git", "guards", "style", "node_modules", "__pycache__", ".venv", "venv"}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in skip]
-        for fn in filenames:
-            rel = os.path.relpath(os.path.join(dirpath, fn), root).replace(os.sep, "/")
-            if not any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(rel, p.rstrip("/") + "/*")
-                       for p in pats):
+        return
+    prefixes = []
+    for pattern in pats:
+        parts = pattern.split("/")
+        if not pattern or os.path.isabs(pattern) or ".." in parts or "\\" in pattern:
+            out.append(("DATA-PATH", pattern, "DATA declarations must be repository-relative paths"))
+            return
+        literal = []
+        for part in parts:
+            if any(char in part for char in "*?["):
+                break
+            literal.append(part)
+        prefixes.append(os.path.normcase("/".join(literal)).replace("\\", "/"))
+
+    def may_contain(rel):
+        rel = os.path.normcase(rel).replace("\\", "/")
+        return any(not p or p == rel or p.startswith(rel + "/") or rel.startswith(p + "/")
+                   for p in prefixes)
+
+    def scan_error(error):
+        raise error
+
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=scan_error):
+        descend = []
+        for name in sorted(dirnames + filenames):
+            if name == ".git":
                 continue
-            present += 1
-            try:
-                # check-ignore exits 0 when the path IS ignored.
-                if subprocess.run(["git", "-C", root, "check-ignore", "-q", rel],
-                                  capture_output=True).returncode != 0:
-                    unignored += 1
-            except OSError:
-                unignored += 1
-    return (present, unignored)
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            relevant = _data_covered(rel, pats)
+            is_dir = name in dirnames
+            if is_dir and may_contain(rel):
+                info = os.lstat(full)
+                linked = os.path.islink(full) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+                if linked:
+                    relevant = True
+                elif not relevant:
+                    descend.append(name)
+            if relevant:
+                out.append(("DATA-PRESENT", rel,
+                            "DATA paths must be physically absent from the tool worktree; "
+                            "use the private companion repository"))
+        dirnames[:] = descend
 
 
 def check_data_has_schema(root, m, out):
@@ -370,63 +446,386 @@ def check_fixtures_are_generated(root, m, out):
                             "Change the SCHEMA, then run: python tools/make_fixtures.py"))
 
 
-def _resolve_companion(start):
-    """Ask tools/datadir.py where this skill's private data lives. ONE resolver, here too.
+def _resolver_path(target):
+    """Select a tracked resolver from this tool or the target's registered guard submodule."""
+    modules = os.path.join(target, ".gitmodules")
+    selected = []
+    if os.path.isfile(modules):
+        config = {}
+        for entry in _run(["git", "config", "--file", modules, "--null", "--list"], target).split("\0"):
+            if entry:
+                key, _, value = entry.partition("\n")
+                config.setdefault(key, []).append(value)
+        for key, values in config.items():
+            if not key.startswith("submodule.") or not key.endswith(".url"):
+                continue
+            if any(_github_repo_key(value) == ("daizedong", "fleet-guards") for value in values):
+                paths = config.get(key[:-3] + "path", [])
+                if len(values) != 1 or len(paths) != 1:
+                    raise RuntimeError("guard submodule declaration is ambiguous")
+                selected.append(paths[0])
+    if len(selected) > 1:
+        raise RuntimeError("multiple guard submodules are registered; resolver provenance is ambiguous")
+    if selected:
+        relative = selected[0]
+        if (not relative or "\\" in relative or ntpath.splitdrive(relative)[0]
+                or any(part in ("", ".", "..") for part in relative.split("/"))):
+            raise RuntimeError("guard submodule path must be canonical and repository-relative")
+        if relative not in gitlinks(target):
+            raise RuntimeError("guard submodule has no authoritative gitlink in the index")
+        deployment = os.path.realpath(os.path.join(target, relative))
+        if os.path.commonpath([deployment, target]) != target or deployment == target:
+            raise RuntimeError("guard submodule resolves outside the target worktree")
+        if not os.path.isdir(deployment) or os.path.realpath(_repo_root(deployment)) != deployment:
+            raise RuntimeError("guard submodule checkout is incomplete")
+    else:
+        deployment = os.path.realpath(_repo_root(os.path.dirname(os.path.abspath(__file__))))
+        if deployment != target or os.path.dirname(os.path.abspath(__file__)) != os.path.join(target, "tools"):
+            raise RuntimeError("no guard submodule is registered; run the target's own tools/data_boundary.py "
+                               "or supply --companion-dir explicitly")
+    resolver = os.path.join(deployment, "tools", "datadir.py")
+    if not os.path.isfile(resolver) or os.path.realpath(resolver) != resolver:
+        raise RuntimeError("the selected guard deployment has no local tools/datadir.py")
+    info = os.lstat(resolver)
+    if getattr(info, "st_file_attributes", 0) & 0x400:
+        raise RuntimeError("the selected resolver is a redirected file")
+    entries = _run(["git", "ls-files", "--stage", "-z", "--", "tools/datadir.py"], deployment).split("\0")
+    entries = [entry for entry in entries if entry]
+    if len(entries) != 1 or entries[0].split("\t", 1)[0].split()[0] not in ("100644", "100755"):
+        raise RuntimeError("the selected tools/datadir.py is not a tracked regular source file")
+    return resolver
 
-    Not a second probe order. The whole point of datadir.py is that exactly one piece of code
-    answers "where does real-run output go"; a checker that answered it independently could
-    disagree with the writer it is auditing, and the disagreement would look like a clean report.
-    """
-    # LOAD THE TARGET REPO'S datadir.py, not the one beside this file. datadir resolves the sibling
-    # companion relative to ITS OWN worktree, so a copy living outside the repo under audit answers
-    # for its own neighbourhood, which is to say None. The vendored copies were unaffected because
-    # there the two paths coincide, and that is exactly the kind of bug that only appears when
-    # someone runs the tool the less usual way. Measured: an out-of-tree copy invoked with --repo
-    # reported "no companion resolved" for a repo whose companion was one directory over.
-    try:
-        target = _repo_root(start)
-    except GitError:
-        target = start
-    # LOOKUP ORDER, and why the first entry exists. The kit became a submodule on 2026-09-01,
-    # so a consumer's resolver moved from tools/ to guards/tools/. This list still asked only
-    # for tools/datadir.py, missed, and fell through to the copy beside THIS file. Inside a
-    # consumer that fallback happens to be the same submodule copy, so nothing looked wrong;
-    # run from a checkout OUTSIDE the repo under audit it loads that other copy instead, and a
-    # stale resolver is the one component whose wrongness is invisible -- it returns a path, and
-    # every caller believes it.
-    dd_path = None
-    for cand in (os.path.join(target, "guards", "tools", "datadir.py"),
-                 os.path.join(target, "tools", "datadir.py"),
-                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "datadir.py")):
-        if os.path.isfile(cand):
-            dd_path = cand
-            break
-    if dd_path is None:
-        return None
-    spec = importlib.util.spec_from_file_location("_data_boundary_datadir", dd_path)
+
+def _resolve_companion(start):
+    """Ask the intended deployment's resolver for the writer's actual DATA destination."""
+    target = os.path.realpath(_repo_root(start))
+    resolver = _resolver_path(target)
+    spec = importlib.util.spec_from_file_location("_data_boundary_datadir", resolver)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    try:
-        root = _repo_root(start)
-    except GitError:
-        root = start
-    # DataDirInsideOwnRepo is deliberately NOT caught: a data dir pointing into the tool repo is a
-    # defect, and a traceback naming it is a better outcome than "no companion resolved".
-    # resolve_companion_root, not resolve_data_dir: check_companion runs `git status` on what
-    # it gets back, and the ROOT is what a person reads in that report. Both answers come from
-    # the same candidate list, so this is still one probe order, not two.
-    # A vendored datadir.py older than resolve_companion_root is a real state during a rollout, and
-    # it must degrade to "cannot answer" rather than to a traceback. Deliberately NOT falling back
-    # to resolve_data_dir: that returns the data DIRECTORY, and silently auditing a subdirectory
-    # while reporting it as the companion is the kind of near-miss this file exists to refuse.
-    fn = getattr(mod, "resolve_companion_root", None)
+    fn = getattr(mod, "resolve_data_dir", None)
     if fn is None:
+        raise RuntimeError("the selected resolver has no resolve_data_dir API")
+    destination = fn(os.path.basename(target))
+    return str(destination) if destination else None
+
+
+def _github_repo_key(url):
+    """Recognize an unambiguous GitHub destination without exposing URL credentials."""
+    from urllib.parse import urlsplit
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:"):]
+    else:
+        if not url.startswith(("https://", "ssh://")) or any(ord(char) < 32 for char in url):
+            return None
+        try:
+            parsed = urlsplit(url)
+            if (parsed.scheme not in ("https", "ssh") or parsed.hostname != "github.com"
+                    or parsed.password or parsed.query or parsed.fragment or parsed.port is not None
+                    or parsed.netloc.endswith(":")
+                    or parsed.username not in (None, "git")):
+                return None
+        except ValueError:
+            return None
+        path = parsed.path.lstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", path):
         return None
-    p = fn(os.path.basename(os.path.normpath(root)))
-    return str(p) if p else None
+    owner, name = path.lower().split("/")
+    return None if name in (".", "..") else (owner, name)
 
 
-def check_companion(companion, max_report):
+def _ssh_profile_home():
+    """OpenSSH can use the account profile independently of HOME or USERPROFILE."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            buffer = ctypes.create_unicode_buffer(32768)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x28, None, 0, buffer) != 0:
+                return None
+            return buffer.value or None
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (OSError, ImportError, AttributeError, KeyError):
+        return None
+
+
+def _ssh_config_paths():
+    """Default configurations of recognized system or Git-bundled OpenSSH clients."""
+    import shutil
+    from pathlib import Path
+    client = shutil.which("ssh")
+    if not client:
+        return None
+    canonical = lambda path: os.path.normcase(os.path.realpath(path))
+    profile = _ssh_profile_home()
+    if not profile:
+        return None
+    homes = {profile, os.path.expanduser("~"), os.environ.get("HOME"), os.environ.get("USERPROFILE")}
+    paths = {str(Path(home) / ".ssh/config") for home in homes if home and home != "~"}
+    if not paths:
+        return None
+    if os.name == "nt":
+        windows, program_data = os.environ.get("SystemRoot"), os.environ.get("ProgramData")
+        if not windows or not program_data:
+            return None
+        clients = {canonical(Path(windows) / "System32/OpenSSH/ssh.exe")}
+        paths.add(str(Path(program_data) / "ssh/ssh_config"))
+        git = shutil.which("git")
+        if git and Path(git).parent.name.lower() in {"bin", "cmd"}:
+            installation = Path(git).parent.parent
+            clients.add(canonical(installation / "usr/bin/ssh.exe"))
+            paths.add(str(installation / "etc/ssh/ssh_config"))
+    else:
+        clients = {canonical("/usr/bin/ssh"), canonical("/bin/ssh")}
+        paths.add("/etc/ssh/ssh_config")
+    return sorted(paths) if canonical(client) in clients else None
+
+
+def _ssh_configuration_problem():
+    """Prove the canonical host under a deliberately small static OpenSSH policy.
+
+    Never invoke ssh -G: evaluating Match exec there can execute configuration commands.
+    Unknown clients, redirects, Includes, Match, proxies and unsupported active options fail closed.
+    Server authentication must retain default trust files and default, yes, or ask verification.
+    """
+    import fnmatch
+    import shlex
+    import stat
+    from pathlib import Path
+    paths = _ssh_config_paths()
+    if paths is None:
+        return "SSH client or default configuration locations are unproven"
+    harmless = {"identityfile", "identitiesonly", "batchmode", "preferredauthentications",
+                "passwordauthentication", "pubkeyauthentication", "kbdinteractiveauthentication",
+                "loglevel",
+                "connecttimeout", "serveraliveinterval", "serveralivecountmax", "tcpkeepalive",
+                "addkeystoagent", "identityagent", "hashknownhosts", "sendenv", "gssapiauthentication"}
+    fixed = {"hostname": "github.com", "user": "git", "port": "22"}
+    for name in paths:
+        path = Path(name)
+        try:
+            for node in [*reversed(path.parents), path]:
+                try:
+                    info = node.lstat()
+                except FileNotFoundError:
+                    continue
+                if (stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400
+                        or stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
+                    return "SSH configuration has an unproven filesystem alias"
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            if len(data) > 65536:
+                return "SSH configuration exceeds the static attestation limit"
+            active = True
+            for line in data.decode("utf-8-sig").splitlines():
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                # The subset avoids parser-dependent inline comments and continuation rules.
+                if "#" in line:
+                    return "SSH configuration has unsupported inline syntax"
+                fields = shlex.split(re.sub(r"^(\s*[A-Za-z]+)\s*=\s*", r"\1 ", line))
+                if len(fields) < 2:
+                    return "SSH configuration has an unsupported directive"
+                key, values = fields[0].lower(), fields[1:]
+                if key in {"include", "match"}:
+                    return "SSH Include or Match cannot establish a static destination"
+                if key == "host":
+                    if any("[" in value or "\\" in value for value in values):
+                        return "SSH Host pattern is outside the static policy"
+                    matches = lambda value: fnmatch.fnmatchcase("github.com", value.lower())
+                    active = (any(matches(value) for value in values if not value.startswith("!"))
+                              and not any(matches(value[1:]) for value in values if value.startswith("!")))
+                elif active and key in fixed:
+                    if len(values) != 1 or values[0].lower() != fixed[key] or "\\" in line:
+                        return "SSH configuration changes the canonical destination"
+                elif active and key == "stricthostkeychecking":
+                    if len(values) != 1 or values[0].lower() not in {"yes", "ask"}:
+                        return "SSH configuration does not preserve server authentication"
+                elif active and key in {"userknownhostsfile", "globalknownhostsfile"}:
+                    return "SSH configuration overrides the default server trust files"
+                elif active and key not in harmless:
+                    return "SSH configuration contains an unproven active option"
+        except (OSError, UnicodeError, ValueError):
+            return "SSH configuration could not be statically verified"
+    return None
+
+
+def _companion_location(destination, env):
+    """Discover administration and a containing worktree under a specified Git policy."""
+    root = _run(["git", "rev-parse", "--show-toplevel"], destination, env=env).strip()
+    admin = _run(["git", "rev-parse", "--absolute-git-dir"], destination, env=env).strip()
+    if not root or not admin:
+        raise GitError("Git named no worktree or administration for the DATA destination")
+    root, admin = os.path.realpath(root), os.path.realpath(admin)
+    try:
+        contains_data = os.path.normcase(os.path.commonpath([root, destination])) == os.path.normcase(root)
+    except ValueError:
+        contains_data = False
+    if not contains_data:
+        raise GitError("Git worktree does not contain the physical DATA destination")
+    return root, admin
+
+
+def _companion_git_context(destination):
+    """Authorize ownership with existing Git policy, then bind the physical DATA repository.
+
+    The hook's repository and index selectors belong to its caller. Clear them only for
+    this separate proof. Existing ownership permission is checked before carrying that
+    permission into a second discovery with process URL rewrites excluded.
+    """
+    selectors = {
+        "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG",
+    }
+    effective = {key: value for key, value in os.environ.items()
+                 if key.upper() not in selectors}
+    destination = os.path.realpath(destination)
+    authorized_root, authorized_admin = _companion_location(destination, effective)
+    physical = {key: value for key, value in effective.items()
+                if not key.upper().startswith("GIT_CONFIG_")}
+    physical.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                    GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="1",
+                    GIT_CONFIG_KEY_0="safe.directory",
+                    GIT_CONFIG_VALUE_0=authorized_root.replace(os.sep, "/"))
+    # Carry only this filesystem option; URL/config redirects remain outside the baseline.
+    for entry in _run(["git", "config", "--null", "--list"], destination, env=effective).split("\0"):
+        key, separator, value = entry.partition("\n")
+        if key.lower() == "core.longpaths":
+            physical.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_1="core.longpaths",
+                            GIT_CONFIG_VALUE_1=value if separator else "true")
+    root, admin = _companion_location(destination, physical)
+    if os.path.normcase(admin) != os.path.normcase(authorized_admin):
+        raise GitError("Physical Git administration differs from the authorized repository")
+    for environment in (physical, effective):
+        environment.update(GIT_DIR=admin, GIT_WORK_TREE=root,
+                           GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0")
+    return root, physical, effective
+
+
+def _companion_visibility(root, visibility_map, git_context=None):
+    """Require both physical and effective destinations to have fresh PRIVATE receipts."""
+    root, physical, effective = git_context or _companion_git_context(root)
+    proven = set()
+    for environment in (physical, effective):
+        destinations, errors = _companion_visibility_once(root, visibility_map, environment)
+        if errors:
+            return [], errors
+        proven.update(destinations)
+    return sorted(proven), []
+
+
+_HTTPS_PERFORMANCE_KEYS = {
+    "version", "maxrequests", "minsessions", "postbuffer", "lowspeedlimit",
+    "lowspeedtime", "keepaliveidle", "keepaliveinterval", "keepalivecount",
+}
+_HTTPS_PERFORMANCE_ENV = {"git_http_low_speed_limit", "git_http_low_speed_time"}
+
+
+def _https_configuration_problem(config_entries, env):
+    """Prove default HTTPS routing and trust under a small static configuration policy.
+
+    A PRIVATE receipt identifies the repository, but cannot authorize a different
+    connection selected by a proxy, resolver, trust override, or transport helper.
+    Diagnostics name only the category; configuration values can contain secrets.
+    """
+    for name in env:
+        key = name.casefold()
+        if (key in {"http_proxy", "https_proxy", "all_proxy", "curl_ca_bundle",
+                    "ssl_cert_file", "ssl_cert_dir", "curl_ssl_backend", "git_exec_path"}
+                or key.startswith(("git_ssl_", "git_proxy_ssl_"))
+                or (key.startswith("git_http_") and key not in _HTTPS_PERFORMANCE_ENV)):
+            return "unproved HTTPS environment override"
+    # Inspect every occurrence, including URL scopes and values before an empty reset.
+    for key, value in config_entries:
+        key = key.casefold()
+        option = key.rsplit(".", 1)[-1]
+        if key.startswith("remote.") and option.startswith("proxy"):
+            return "unproved remote HTTPS proxy"
+        if not key.startswith("http."):
+            continue
+        if option in _HTTPS_PERFORMANCE_KEYS:
+            continue
+        if option == "sslverify" and value is not None and value.strip().casefold() in {"true", "yes", "on", "1"}:
+            continue
+        return "unproved HTTP configuration override"
+    return None
+
+
+def _companion_visibility_once(root, visibility_map, env):
+    """Require fresh PRIVATE evidence for every effective fetch and push destination.
+
+    Reuse pii_guard's visibility receipt format and maximum age. Git expands insteadOf and
+    pushInsteadOf through get-url; checking every remote also covers branch pushRemote choices.
+    Unknown hosts, SSH aliases, absent receipts and stale receipts cannot authorize DATA.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pii_guard.py")
+    try:
+        spec = importlib.util.spec_from_file_location("_boundary_visibility", path)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        visibility = guard._load_visibility(visibility_map)
+    except (OSError, ValueError, RuntimeError, ImportError, AttributeError):
+        return [], ["companion visibility receipt could not be verified"]
+    if visibility is None:
+        return [], ["companion has no visibility receipt; visibility is UNKNOWN"]
+    public, private, age = visibility
+    if age is None or not 0 <= age <= guard.VIS_MAX_AGE_S:
+        return [], ["companion visibility receipt is undated, stale or future-dated; visibility is UNKNOWN"]
+    remotes = _run(["git", "remote"], root, env=env).splitlines()
+    if not remotes:
+        return [], ["companion has no configured remote; visibility is UNKNOWN"]
+    config = {}
+    config_entries = []
+    for entry in _run(["git", "config", "--null", "--list"], root, env=env).split("\0"):
+        if entry:
+            key, separator, value = entry.partition("\n")
+            config_entries.append((key, value if separator else None))
+            config[key.lower()] = value
+    if any(key.startswith("remote.") and key.rsplit(".", 1)[-1] in {"vcs", "uploadpack", "receivepack"}
+           for key in config):
+        return [], ["companion has a custom remote transport command; visibility is UNKNOWN"]
+    ssh_override = (any(name in env for name in ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"))
+                    or any(name in config for name in ("core.sshcommand", "ssh.variant")))
+    ssh_check = []
+    https_check = []
+    proven, errors = set(), []
+    for remote in remotes:
+        for role, options in (("fetch", []), ("push", ["--push"])):
+            urls = _run(["git", "remote", "get-url", *options, "--all", remote], root, env=env).splitlines()
+            if not urls:
+                errors.append("companion remote %s %s has no destination; visibility is UNKNOWN" % (remote, role))
+            for url in urls:
+                key = _github_repo_key(url)
+                if key is not None and url.startswith("https://"):
+                    if not https_check:
+                        https_check.append(_https_configuration_problem(config_entries, env))
+                    if https_check[0]:
+                        errors.append("companion HTTPS destination is UNKNOWN: " + https_check[0])
+                        continue
+                if key is not None and (url.startswith("git@") or url.startswith("ssh://")):
+                    if not ssh_check:
+                        ssh_check.append("custom SSH transport override" if ssh_override else _ssh_configuration_problem())
+                    if ssh_check[0]:
+                        errors.append("companion SSH destination is UNKNOWN: " + ssh_check[0])
+                        continue
+                if key is None:
+                    errors.append("companion remote %s %s destination is UNKNOWN" % (remote, role))
+                elif key[1] in public.get(key[0], set()):
+                    errors.append("companion destination %s/%s is PUBLIC" % key)
+                elif key not in private:
+                    errors.append("companion destination %s/%s is UNKNOWN" % key)
+                else:
+                    proven.add("%s/%s" % key)
+    return sorted(proven), sorted(set(errors))
+
+
+def check_companion(companion, max_report, visibility_map=None):
     """Is the PRIVATE companion repo's real-run output actually under version control?
 
     THIS IS NOT THE SAME QUESTION AS THE ONE ABOVE, and conflating them has already caused one
@@ -444,9 +843,18 @@ def check_companion(companion, max_report):
     companion exits 3, which is neither clean nor a violation.
     """
     try:
-        root = _repo_root(companion)
-        status = _run(["git", "status", "--porcelain", "--untracked-files=all", "-z"], root)
-        tracked_files = tracked(root)
+        destination = os.path.realpath(companion)
+        context = _companion_git_context(destination)
+        root, _physical, effective = context
+        proven, visibility_errors = _companion_visibility(root, visibility_map, context)
+        if visibility_errors:
+            for error in visibility_errors:
+                print("data_boundary --companion: VISIBILITY BLOCKED: %s" % error, file=sys.stderr)
+            return 1
+        print("data_boundary --companion: PRIVATE verified: %s" % ", ".join(proven))
+        print("  verified DATA destination: %s" % destination)
+        status = _run(["git", "status", "--porcelain", "--untracked-files=all", "-z"], root, env=effective)
+        tracked_files = {p for p in _run(["git", "ls-files", "-z"], root, env=effective).split("\0") if p}
     except GitError as e:
         print("data_boundary --companion: SCAN FAILED, NOTHING was examined.\n  %s" % e,
               file=sys.stderr)
@@ -634,7 +1042,7 @@ def check_no_undeclared_run_shapes(root, m, files, out):
     """The check that survives an EMPTY manifest -- see "WHY CHECK 4 EXISTS" at the top of this file.
 
     Checks 1..3 are declaration-driven, so a repo that declares nothing is checked for nothing. This
-    one runs off the tracked file list instead: any file shaped like real-run output must be
+    one runs over tracked and physical names: any path shaped like real-run output must be
     ACCOUNTED FOR by name in the manifest, under `data`/`data_sealed` (check 1 then reports it),
     `fixture` (check 2 then proves it is generator-reproducible), or `tool` (a per-path allowlist
     entry, which shows up in the diff and has to be argued for -- the .pii-allow pattern).
@@ -666,7 +1074,10 @@ def main():
                     help="also audit the PRIVATE companion repo for run output that is neither "
                          "tracked nor ignored (exit 3 if no companion resolves: NOTHING checked)")
     ap.add_argument("--companion-dir", metavar="PATH",
-                    help="the companion repo to audit, instead of resolving one")
+                    help="the companion to audit; attest data/ when present, otherwise this path")
+    ap.add_argument("--visibility-map", metavar="PATH",
+                    help="companion visibility receipt (default: ~/.pii-guard/visibility.json); "
+                         "all effective remote destinations must have fresh PRIVATE evidence")
     ap.add_argument("--max-report", type=int, default=20,
                     help="cap the --companion listing (the cap and the count withheld are printed)")
     ap.add_argument("--calibration", action="store_true",
@@ -685,7 +1096,13 @@ def main():
     if a.companion or a.companion_dir:
         # Deliberately opt-in and deliberately NOT in CI: there is no companion on a CI runner, and
         # a check that cannot run must say so rather than pass. Exit 3 when none resolves.
-        comp = a.companion_dir or _resolve_companion(os.path.abspath(a.repo))
+        try:
+            comp = a.companion_dir or _resolve_companion(os.path.abspath(a.repo))
+        except (RuntimeError, OSError, ImportError) as error:
+            print("data_boundary --companion: RESOLVER BLOCKED: %s" % error, file=sys.stderr)
+            return 2
+        if a.companion_dir and os.path.isdir(os.path.join(comp, "data")):
+            comp = os.path.join(comp, "data")
         if comp is None:
             print("data_boundary --companion: no private companion repo resolved, so\n"
                   "  NOTHING was examined. This is not a clean bill of health. Point\n"
@@ -693,7 +1110,7 @@ def main():
                   % os.path.basename(os.path.abspath(a.repo)).upper().replace("-", "_"),
                   file=sys.stderr)
             return 3
-        return check_companion(comp, a.max_report)
+        return check_companion(comp, a.max_report, a.visibility_map)
 
     try:
         root = _repo_root(os.path.abspath(a.repo))
@@ -745,11 +1162,21 @@ def main():
         m = {}
 
     out = []
+    validate_declarations(m, out)
+    if out:
+        for kind, path, reason in out:
+            print("%s: %s: %s" % (kind, path, reason), file=sys.stderr)
+        return 1
     check_data_not_tracked(root, m, files, out)
-    data_on_disk, data_unignored = check_data_absent_from_worktree(root, m)
+    try:
+        check_data_absent_from_worktree(root, m, out)
+        all_paths = files | set(physical_paths(root))
+    except (OSError, GitError) as e:
+        print("data_boundary: SCAN FAILED while checking physical DATA paths: %s" % e, file=sys.stderr)
+        return 2
     check_data_has_schema(root, m, out)
     check_fixtures_are_generated(root, m, out)
-    check_no_undeclared_run_shapes(root, m, files, out)
+    check_no_undeclared_run_shapes(root, m, all_paths, out)
     calib = None
     if not manifest_absent:
         # Check 5 asks whether an EMPTY data list was a finding. With no manifest at all there is
@@ -762,11 +1189,11 @@ def main():
 
     if not out and manifest_absent:
         print("data_boundary: NOT ARMED. There is no %s in %s, so checks 1, 2, 3 and 5 asserted\n"
-              "  NOTHING about this repo. Check 4 ran (it needs no manifest) and found no tracked\n"
-              "  file wearing the shape of real-run output, across %d tracked files, that is the\n"
+              "  NOTHING about this repo. Check 4 ran (it needs no manifest) and found no tracked or\n"
+              "  physical file wearing the shape of real-run output, across %d names, that is the\n"
               "  only statement this run is entitled to make.\n"
               "  Declare the repo's classes in %s to arm the rest."
-              % (MANIFEST, root, len(files), MANIFEST), file=sys.stderr)
+              % (MANIFEST, root, len(all_paths), MANIFEST), file=sys.stderr)
         return 3
 
     if calib == "uncalibrated" and a.calibration:
@@ -787,23 +1214,16 @@ def main():
         # and does not match is still a VIOLATION. What is now silent is only the absence of a probe
         # list, which is a question about measurement rather than a finding about this repo.
         print("data_boundary: NOT CALIBRATED for this repo. The probe list in %s is empty,\n"
-              "  so check 4 asserted only that no tracked file matches a list nobody has\n"
+              "  so check 4 asserted only that no tracked or physical file matches a list nobody has\n"
               "  held against this skill's own output. Build it by running a real run's\n"
               "  filenames through --explain and committing the SCHEMATIC forms." % MANIFEST,
               file=sys.stderr)
 
     if not out:
-        if not data_on_disk:
-            _disk = ""
-        elif data_unignored:
-            _disk = (", %d present in the worktree (%d of them NOT ignored)"
-                     % (data_on_disk, data_unignored))
-        else:
-            _disk = ", %d present in the worktree but ignored" % data_on_disk
-        print("data_boundary: clean (%d DATA + %d sealed paths not tracked%s, %d FIXTUREs "
-              "generator-reproducible, %d tracked files carry no real-run shape)"
-              % (len(m.get("data", [])), len(m.get("data_sealed", [])), _disk,
-                 len(m.get("fixture", [])), len(files)))
+        print("data_boundary: clean (%d DATA + %d sealed paths not tracked and absent from the worktree, %d FIXTUREs "
+              "generator-reproducible, %d tracked or physical paths carry no undeclared real-run shape)"
+              % (len(m.get("data", [])), len(m.get("data_sealed", [])),
+                 len(m.get("fixture", [])), len(all_paths)))
         return 0
 
     print("data_boundary: %d violation(s) -- this repo is not an uninitialized tool\n" % len(out),
@@ -813,7 +1233,7 @@ def main():
     print("\nA public skill repo ships the TOOL and a SYNTHETIC fixture set. Everything a real run\n"
           "produced -- telemetry, real goldens, calibration, verdicts, config -- belongs in the\n"
           "private companion repo, and the loader resolves it from there.\n"
-          "\nRUN-SHAPE means: this tracked file looks like output, and no class claims it. Move it out\n"
+          "\nRUN-SHAPE means: this file or link looks like output, and no class claims it. Move it out\n"
           "(the usual answer), or -- if it really is hand-written TOOL material that happens to wear\n"
           "the shape -- add the exact path to \"tool\" in %s with a reason." % MANIFEST,
           file=sys.stderr)
