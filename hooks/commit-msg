@@ -3,7 +3,8 @@
 #
 # WHY THIS FILE EXISTS AT ALL
 # `core.hooksPath` accepts exactly one directory, and in a repo that installs this kit that one
-# directory is this one. A repo-level hooksPath therefore SHADOWS the machine-level hooks entirely,
+# directory is the consumer's .githooks/. Its optional commit-msg shim forwards here. A local
+# hooksPath SHADOWS the machine-level hooks entirely,
 # per hook name. That is not a theory: on 2026-09-23 a machine-level `commit-msg` was installed,
 # verified to block a wrapped commit body in a repo with no repo-level hooksPath, and then silently
 # did nothing in a repo that points hooksPath here. The commit sailed through while the hook looked
@@ -40,7 +41,7 @@ MSG_FILE="$1"
 [ -n "$MSG_FILE" ] || exit 0
 
 # The machine-level hooks directory, as git itself resolved it. `--global` on purpose: the LOCAL
-# value is this directory, which is what shadowed the machine-level hook in the first place.
+# value is the consumer shim directory, which shadows the machine-level hook.
 _dir=$(git config --global core.hooksPath 2>/dev/null)
 if [ -z "$_dir" ]; then
   exit 0                      # no machine-level hooks configured: nothing to forward to

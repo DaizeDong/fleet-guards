@@ -30,6 +30,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import subprocess
 
 import pytest
 
@@ -45,6 +46,113 @@ def load(path, name="datadir_under_test"):
 
 
 dd = load(DATADIR)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_source7_implicit_creation_refuses_before_writes(tmp_path, monkeypatch, installed):
+    home = _isolate_home(monkeypatch, tmp_path)
+    if installed:
+        _repo, resolver = _skill_repo(tmp_path)
+    else:
+        resolver = dd
+        monkeypatch.setattr(resolver, "_own_repo_root", lambda: None)
+    for _attempt in range(2):
+        with pytest.raises(resolver.DataDirNotInitialized):
+            resolver.resolve_data_dir("fakeskill", create=True)
+        assert resolver.resolve_data_dir("fakeskill") is None
+    assert not (tmp_path / "fakeskill-config").exists()
+    assert not (home / ".fakeskill-config").exists()
+    assert not (home / ".fakeskill-data").exists()
+
+
+def test_source7_explicit_creation_stays_resolvable(tmp_path, monkeypatch):
+    _isolate_home(monkeypatch, tmp_path)
+    _repo, resolver = _skill_repo(tmp_path)
+    destination = tmp_path / "explicit-companion" / "data"
+    monkeypatch.setenv("FAKESKILL_DATA_DIR", str(destination))
+    assert resolver.resolve_data_dir("fakeskill", create=True) == destination
+    assert resolver.resolve_data_dir("fakeskill") == destination
+
+
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("alias_target", ["module", "tools"])
+def test_source4_installed_alias_preserves_consumer_boundary(tmp_path, monkeypatch, linked, alias_target):
+    from make_fixtures import make_install_alias
+    from test_data_boundary import native_submodule_layout
+    _isolate_home(monkeypatch, tmp_path)
+    consumer, module = native_submodule_layout(tmp_path, "vendor/security", linked, resolver=True)
+    canonical = load(module / "tools/datadir.py", "canonical_resolver")
+    target = module if alias_target == "module" else module / "tools"
+    alias = make_install_alias(tmp_path / "installed", target)
+    installed = load(alias / ("tools/datadir.py" if alias_target == "module" else "datadir.py"),
+                     "installed_resolver")
+    outside = tmp_path / "consumer-config" / "new-data"
+    for resolver in (canonical, installed):
+        assert os.path.samefile(resolver._own_repo_root(), consumer)
+        monkeypatch.setenv("DEMO_DATA_DIR", str(consumer / "new-data"))
+        with pytest.raises(resolver.DataDirInsideOwnRepo):
+            resolver.resolve_data_dir("demo", create=True)
+        assert not (consumer / "new-data").exists()
+        monkeypatch.setenv("DEMO_DATA_DIR", str(outside))
+        assert resolver.resolve_data_dir("demo", create=True) == outside
+
+
+@pytest.mark.parametrize("failure_at", ["module", "target", "repository"])
+def test_source4_resolution_error_refuses_authorization(tmp_path, monkeypatch, failure_at):
+    from test_data_boundary import native_submodule_layout
+    consumer, module = native_submodule_layout(tmp_path, "security", resolver=True)
+    resolver = load(module / "tools/datadir.py")
+    outside = tmp_path / "consumer-config" / "not-created"
+    failed = {"module": resolver.__file__, "target": str(outside), "repository": str(consumer)}[failure_at]
+    original = os.path.realpath
+
+    def broken(path, *args, **kwargs):
+        if os.path.normcase(str(path)) == os.path.normcase(failed):
+            raise OSError("synthetic resolution failure")
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os.path, "realpath", broken)
+        with pytest.raises((OSError, RuntimeError), match="resolution"):
+            resolver.assert_outside_own_repo(outside, "demo")
+    assert not outside.exists()
+
+
+@pytest.mark.parametrize("section,key,value,valid", [
+    ('[remote "origin"]', 'url', 'https://github.com/example-owner/demo-config.git', True),
+    ('[remote "origin"]', 'URL', '"https://github.com/example-owner/demo-config.git"', True),
+    ('[remote "origin"]', 'urlfake', 'https://github.com/example-owner/demo-config.git', False),
+    ('[remoteorigin]', 'url', 'https://github.com/example-owner/demo-config.git', False),
+    ('[remote "Origin"]', 'url', 'https://github.com/example-owner/demo-config.git', False),
+    ('[remote "origin"] trailing', 'url', 'https://github.com/example-owner/demo-config.git', False),
+])
+def test_source3_origin_proof_uses_exact_supported_git_syntax(tmp_path, section, key, value, valid):
+    from make_fixtures import write_origin_config
+    companion = tmp_path / "demo-config"
+    write_origin_config(companion, section, key, value)
+    assert dd._proves_companion(companion, "demo") is valid
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_source3_worktree_config_cannot_override_companion_proof(tmp_path, linked):
+    from make_fixtures import write_record
+    from test_data_boundary import git, make_repo
+
+    mother = make_repo(tmp_path, name="companion-main",
+                       remote="https://github.com/example-owner/demo-config.git")
+    write_record(mother, "data/item.json")
+    git(mother, "add", "data/item.json")
+    git(mother, "-c", "user.name=Example", "-c", "user.email=user1@example.com",
+        "commit", "-qm", "Synthetic companion")
+    companion = mother
+    if linked:
+        companion = tmp_path / "companion-linked"
+        git(mother, "worktree", "add", "--detach", str(companion))
+    git(mother, "config", "extensions.worktreeConfig", "true")
+    remote = "https://github.com/example-owner/unrelated.git"
+    git(companion, "config", "--worktree", "remote.origin.url", remote)
+    assert git(companion, "config", "--get", "remote.origin.url").strip() == remote
+    assert not dd._proves_companion(companion, "demo")
 
 
 @pytest.fixture(autouse=True)
@@ -265,6 +373,89 @@ def test_assert_outside_own_repo_is_reachable_by_its_public_name(tmp_path, monke
         dd.assert_outside_own_repo(inside, "toolrepo")
 
 
+@pytest.mark.parametrize("with_kit", [False, True])
+def test_linked_consumer_root_and_own_tree_refusal(tmp_path, monkeypatch, with_kit):
+    """A linked consumer's gitfile has a commondir; the kit's submodule gitfile does not."""
+    _isolate_home(monkeypatch, tmp_path)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    admin = tmp_path / "administration" / "linked-entry"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("..\n", encoding="utf-8")
+    (consumer / ".git").write_text("gitdir: " + str(admin) + "\n", encoding="utf-8")
+    module_dir = consumer / "tools"
+    if with_kit:
+        module_dir = consumer / "arbitrary-kit-name" / "tools"
+        module_dir.mkdir(parents=True)
+        (module_dir.parent / ".git").write_text(
+            "gitdir: " + str(admin / "modules" / "arbitrary-kit-name") + "\n", encoding="utf-8")
+    else:
+        module_dir.mkdir()
+    monkeypatch.setattr(dd, "__file__", str(module_dir / "datadir.py"))
+    assert dd._own_repo_root() == str(consumer)
+    monkeypatch.setenv("DEMO_DATA_DIR", str(consumer / "new-data"))
+    with pytest.raises(dd.DataDirInsideOwnRepo):
+        dd.resolve_data_dir("demo", create=True)
+    assert not (consumer / "new-data").exists()
+    outside = tmp_path / "consumer-config"
+    outside.mkdir()
+    monkeypatch.setenv("DEMO_DATA_DIR", str(outside))
+    assert dd.resolve_data_dir("demo") == outside
+    with pytest.raises(dd.DataDirInsideOwnRepo):
+        dd.assert_outside_own_repo(outside / ".." / "consumer" / "record.jsonl", "demo")
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_data_path_cannot_escape_the_companion(tmp_path, monkeypatch, absolute):
+    _isolate_home(monkeypatch, tmp_path)
+    repo, mod = _skill_repo(tmp_path)
+    companion = tmp_path / "fakeskill-config"
+    companion.mkdir()
+    monkeypatch.setenv("FAKESKILL_DATA_DIR", str(companion))
+    rel = str(repo / "escaped" / "record.jsonl") if absolute else "../fakeskill/escaped/record.jsonl"
+    with pytest.raises((mod.DataDirInsideOwnRepo, ValueError)):
+        mod.data_path("fakeskill", rel, create=True)
+    assert not (repo / "escaped").exists()
+
+
+def test_real_git_linked_consumer_with_submodule(tmp_path, monkeypatch):
+    """Exercise Git's actual gitfile layout without a network or an existing repository."""
+    from make_fixtures import write_record
+
+    def git(repo, *args):
+        env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1",
+                   GIT_CONFIG_GLOBAL=str(tmp_path / "absent-gitconfig"), GIT_TERMINAL_PROMPT="0")
+        result = subprocess.run(["git", "-C", str(repo), *args], env=env,
+                                capture_output=True, text=True, encoding="utf-8")
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def seed(name):
+        repo = tmp_path / name
+        repo.mkdir()
+        git(repo, "init", "-q")
+        write_record(repo, "seed.jsonl")
+        git(repo, "add", "seed.jsonl")
+        git(repo, "-c", "user.name=Fixture User", "-c", "user.email=user1@example.com",
+            "commit", "-qm", "Synthetic layout")
+        return repo
+
+    _isolate_home(monkeypatch, tmp_path)
+    kit = seed("kit-source")
+    source = seed("consumer-source")
+    git(source, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(kit), "vendor/security")
+    git(source, "-c", "user.name=Fixture User", "-c", "user.email=user1@example.com",
+        "commit", "-qam", "Add synthetic submodule")
+    linked = tmp_path / "consumer-linked"
+    git(source, "worktree", "add", "-q", "--detach", str(linked))
+    git(linked, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q")
+    monkeypatch.setattr(dd, "__file__", str(linked / "vendor" / "security" / "tools" / "datadir.py"))
+    assert dd._own_repo_root() == git(linked, "rev-parse", "--show-toplevel").replace("/", os.sep)
+    with pytest.raises(dd.DataDirInsideOwnRepo):
+        dd.assert_outside_own_repo(linked / "archive" / "record.jsonl", "demo")
+    dd.assert_outside_own_repo(tmp_path / "consumer-linked-config" / "data", "demo")
+
+
 # --- a CONVENTION-path candidate must prove it is the companion ----------------------------------
 # 2026-09-02. The resolver accepted any directory that merely EXISTED at a candidate path. That is
 # not theoretical: a directory was created at the convention path during unrelated work, the env
@@ -378,3 +569,25 @@ def test_explicit_env_override_needs_no_proof(monkeypatch, tmp_path):
     store.mkdir()
     monkeypatch.setenv("DEMO_DATA_DIR", str(store))
     assert str(dd.resolve_data_dir("demo")) == str(store)
+
+
+def test_source2_real_git_linked_companion_convention(monkeypatch, tmp_path):
+    from pathlib import Path
+    from make_fixtures import write_record
+    from test_data_boundary import git, make_repo
+    _isolate_home(monkeypatch, tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    consumer = make_repo(workspace, name="demo")
+    (consumer / "tools").mkdir()
+    shutil.copyfile(DATADIR, consumer / "tools/datadir.py")
+    mother = make_repo(tmp_path, name="companion-main",
+                       remote="https://github.com/example-owner/demo-config.git")
+    write_record(mother, "data/item.json")
+    git(mother, "add", "data/item.json")
+    git(mother, "-c", "user.name=Example", "-c", "user.email=user1@example.com", "commit", "-qm", "synthetic")
+    linked = workspace / "demo-config"
+    git(mother, "worktree", "add", "--detach", str(linked))
+    resolver = load(str(consumer / "tools/datadir.py"), "linked_companion_resolver")
+    assert Path(resolver.resolve_data_dir("demo")).resolve() == (linked / "data").resolve()
+    assert Path(resolver.resolve_companion_root("demo")).resolve() == linked.resolve()

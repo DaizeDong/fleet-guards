@@ -64,6 +64,8 @@ A fallback into the repo is not a convenience, it is the leak.
 Vendored into each skill as `tools/datadir.py`. Stdlib only.
 """
 import os
+import re
+import stat
 from pathlib import Path
 
 
@@ -75,6 +77,10 @@ class DataDirInsideOwnRepo(RuntimeError):
     """The resolved data dir is inside the skill repo that ships this file. Always a defect."""
 
 
+class DataDirResolutionError(RuntimeError):
+    """A filesystem error prevented establishing the tool/output boundary."""
+
+
 def _env_var(skill):
     return skill.upper().replace("-", "_") + "_DATA_DIR"
 
@@ -84,53 +90,60 @@ def _config_env_vars(skill):
     return (stem + "_CONFIG", stem + "_CONFIG_DIR")
 
 
+def _marker_mode(path):
+    """Return marker metadata; only a missing path establishes absence."""
+    try:
+        return os.stat(path).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise DataDirResolutionError(
+            "Cannot inspect repository marker %s; output is not authorized" % path) from exc
+
+
 def _own_repo_root():
     """The git worktree whose data this module is protecting, or None.
 
     Walks parents looking for `.git`. Deliberately does not shell out: this runs inside live skills
     on machines where git may be absent, and a probe that can fail open is not a check.
 
-    A `.git` FILE rather than a directory means this file is inside a SUBMODULE, and the walk keeps
-    going to the superproject. That distinction is the whole correctness of this function once the
-    guard kit is consumed as a submodule, and getting it wrong is silent and dangerous:
-
-      With the kit vendored at <repo>/tools/, "own repo" was <repo>, the sibling convention looked
-      beside <repo>, and _reject_if_inside_own_repo refused any answer inside <repo>.
-
-      Consumed at <repo>/guards/tools/, the naive walk stopped at <repo>/guards. Every convention
-      candidate then pointed at <repo>/<skill>-config, which is INSIDE THE PUBLIC REPO, and the
-      rejection compared against <repo>/guards, so it did not fire. Measured 2026-09-01 on the
-      first migrated consumer: the real sibling companion became unreachable and the resolver was
-      one mkdir away from nominating a path inside a public repo as the place real output lives.
-      Nothing errored. resolve_companion_root simply answered None, which reads exactly like a
-      machine that has no companion set up yet.
-
-    So the submodule case is detected by SHAPE, not by name: `.git` as a file is git's own marker
-    for "this worktree belongs to a parent", and it is the only reliable signal available without
-    shelling out.
+    Both submodules and linked worktrees have gitfiles. A linked worktree's gitdir carries
+    `commondir`, so it is a boundary in its own right. A submodule's gitfile lets the walk
+    continue to its containing consumer. Retain a gitfile root when no parent exists, as with
+    a standalone repository using --separate-git-dir. No directory name identifies a consumer.
     """
-    d = os.path.dirname(os.path.abspath(__file__))
+    # Installed aliases must protect the consumer containing the physical module.
+    d = os.path.dirname(os.path.realpath(__file__))
+    gitfile_root = None
     while True:
         g = os.path.join(d, ".git")
-        if os.path.isdir(g):
+        mode = _marker_mode(g)
+        if mode is not None and stat.S_ISDIR(mode):
             return d
-        if os.path.isfile(g):
-            # Submodule boundary: keep walking to the superproject.
-            pass
+        if mode is not None and stat.S_ISREG(mode):
+            gitfile_root = d
+            line = Path(g).read_text(encoding="utf-8").strip()
+            if not line.startswith("gitdir:") or not line[7:].strip():
+                raise RuntimeError("Cannot determine the tool repository from its gitfile: %s" % g)
+            gitdir = Path(d) / line[7:].strip()
+            common_mode = _marker_mode(gitdir / "commondir")
+            if common_mode is not None and stat.S_ISREG(common_mode):
+                return d
         parent = os.path.dirname(d)
         if parent == d:
-            return None
+            return gitfile_root
         d = parent
 
 
 def _reject_if_inside_own_repo(p, skill):
-    root = _own_repo_root()
-    if root is None:
-        return                       # not deployed from a worktree; nothing to be inside of
     try:
+        root = _own_repo_root()
+        if root is None:
+            return                   # not deployed from a worktree; nothing to be inside of
         target, repo = os.path.realpath(str(p)), os.path.realpath(root)
-    except OSError:
-        return
+    except OSError as exc:
+        raise DataDirResolutionError(
+            "%s data directory resolution failed; output is not authorized" % skill) from exc
     # normcase for the COMPARISON only; the message keeps the real casing so it is greppable.
     t, r = os.path.normcase(target), os.path.normcase(repo)
     # The separator is load-bearing: `<root>-config` must NOT count as inside `<root>`, and the
@@ -198,11 +211,10 @@ class CompanionUnproven(RuntimeError):
 
 
 def _remote_url(path):
-    """The origin URL from a worktree's .git/config, or None.
+    """The origin URL from a worktree's shared Git configuration, or None.
 
-    Read as text rather than shelled out to git. This runs inside pre-commit hooks across the
-    consuming repo, and a subprocess per candidate is a cost paid on every commit. A submodule's
-    FILE holding a gitdir: pointer, so that one indirection is followed.
+    Read as text rather than shelled out to git. Follow a gitdir file for submodules and linked
+    worktrees, then commondir for the shared configuration of a linked worktree.
     """
     g = path / ".git"
     cfg = None
@@ -214,22 +226,63 @@ def _remote_url(path):
         except OSError:
             return None
         if line.startswith("gitdir:"):
-            cfg = (path / line.split(":", 1)[1].strip()).resolve() / "config"
+            gitdir = (path / line.split(":", 1)[1].strip()).resolve()
+            common = gitdir / "commondir"
+            if common.is_file():
+                try:
+                    common_path = common.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    return None
+                if not common_path:
+                    return None
+                gitdir = (gitdir / common_path).resolve()
+            cfg = gitdir / "config"
     if cfg is None or not cfg.is_file():
         return None
     try:
         text = cfg.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    # Deliberately limited Git syntax: ordinary sections and literal URL values. Includes,
+    # worktree configuration, escaped/continued URLs, duplicates and malformed sections
+    # cannot establish identity without resolving configuration outside this shared file.
     in_origin = False
+    in_extensions = False
+    urls = []
     for raw in text.splitlines():
-        s = raw.strip()
-        if s.startswith("["):
-            in_origin = s.replace(" ", "").replace('"', "").lower() == "[remoteorigin]"
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
             continue
-        if in_origin and s.lower().startswith("url") and "=" in s:
-            return s.split("=", 1)[1].strip()
-    return None
+        if line.startswith("["):
+            section = re.fullmatch(r'\[\s*([A-Za-z][A-Za-z0-9.-]*)(?:\s+"([^"\\]*)")?\s*\]\s*(?:[#;].*)?', line)
+            if section is None or section[1].lower() in ("include", "includeif"):
+                return None
+            in_origin = section[1].lower() == "remote" and section[2] == "origin"
+            in_extensions = section[1].lower() == "extensions" and section[2] is None
+            continue
+        setting = re.fullmatch(r'([A-Za-z][A-Za-z0-9-]*)(?:\s*=\s*(.*))?', line)
+        if setting is None:
+            return None
+        if in_extensions and setting[1].lower() == "worktreeconfig":
+            return None
+        if not in_origin or setting[1].lower() != "url":
+            continue
+        value = setting[2]
+        if value is None or "\\" in value:
+            return None
+        if value.startswith('"'):
+            quoted = re.fullmatch(r'"([^"\\]*)"\s*(?:[#;].*)?', value)
+            if quoted is None:
+                return None
+            value = quoted[1]
+        elif '"' in value:
+            return None
+        else:
+            value = re.split(r'[#;]', value, maxsplit=1)[0].strip()
+        if not value:
+            return None
+        urls.append(value)
+    return urls[0] if len(urls) == 1 else None
 
 
 def _proves_companion(path, skill):
@@ -399,8 +452,13 @@ def resolve_data_dir(skill, create=False):
     if unproven:
         raise _unproven_error(skill, unproven)
     if create:
-        # Create the most specific place the operator actually pointed at: an explicit data-dir
-        # override first, then the companion repo's data/, then the dotfile default.
+        # Inferred names do not authorize initializing a store. The resolver cannot create
+        # a proven private companion, so require an explicit pointer before creating a path.
+        if not any(os.environ.get(name) for name in (_env_var(skill), *_config_env_vars(skill))):
+            raise DataDirNotInitialized(
+                "%s: no initialized companion. Refusing implicit DATA creation. "
+                "Initialize the private companion repository, or set %s or %s to its destination."
+                % (skill, _config_env_vars(skill)[0], _env_var(skill)))
         p = candidates[0][0]
         _reject_if_inside_own_repo(p, skill)
         p.mkdir(parents=True, exist_ok=True)
@@ -423,6 +481,11 @@ def data_path(skill, relpath, create=False):
             "(<file>.example) and a synthetic fixture set."
             % (skill, _config_env_vars(skill)[0], skill, _env_var(skill)))
     p = base / relpath
+    _reject_if_inside_own_repo(p, skill)
+    try:
+        p.resolve().relative_to(base.resolve())
+    except ValueError:
+        raise ValueError("relpath must stay inside the private data directory") from None
     if create:
         p.parent.mkdir(parents=True, exist_ok=True)
     return p
@@ -442,7 +505,7 @@ def _cli(argv=None):
 
     ap = argparse.ArgumentParser(description="Resolve a skill's private data path.")
     ap.add_argument("--path", action="store_true", help="print the resolved path")
-    ap.add_argument("--create", action="store_true", help="create the directory if absent")
+    ap.add_argument("--create", action="store_true", help="create an absent explicit DATA/CONFIG destination")
     ap.add_argument("skill")
     ap.add_argument("relpath", nargs="?", default="")
     a = ap.parse_args(argv)

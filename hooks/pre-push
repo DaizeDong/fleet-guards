@@ -1,6 +1,6 @@
 #!/bin/sh
 # PER-REPO pre-push -- the strict local backstop: tree + EVERY commit reachable from any ref
-# (blobs, messages, author/committer identity).
+# (blobs, messages, author/committer identity, annotated tags, and reference names).
 #
 # Full history is the right scope HERE and only here: this is a repo we own and have already cleaned,
 # so it stays green, and a regression anywhere in it is a real finding. The machine-wide hook cannot
@@ -18,30 +18,20 @@
 # destroy is not a verdict. Belt and braces: the same scan runs in CI (.github/workflows/
 # pii-guard.yml), which no local shell quirk and no --no-verify can reach.
 ROOT="$(git rev-parse --show-toplevel)"
-# WHERE THE GUARDS LIVE, in either of the two shapes this kit ships in.
-#
-# Vendored: the tools sit at <repo>/tools/ alongside a copy of this hook.
-# Submodule: the tools sit inside the submodule, and this hook is being run FROM that submodule
-# because core.hooksPath points into it, so the submodule root is simply this file's parent parent.
-#
-# Resolving from THIS FILE rather than hardcoding either layout is what lets both forms coexist
-# during the migration. A hook that assumed one shape would silently find no scanner in the other,
-# and "no scanner" is the exact state that used to mean "pass quietly".
+# Resolve tools from this hook's kit. Consumer core.hooksPath stays at .githooks, whose
+# forwarding script execs this file after checking that the submodule hook exists.
+# The same relative layout works in a standalone kit. Missing kit tools always block;
+# stale copies in the consumer's tools directory cannot substitute for them.
 _HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 _KIT="$(cd "$_HOOK_DIR/.." && pwd)"
-if [ -f "$_KIT/tools/pii_guard.py" ]; then
-  GUARD="$_KIT/tools/pii_guard.py"
-  BOUNDARY="$_KIT/tools/data_boundary.py"
-else
-  GUARD="$ROOT/tools/pii_guard.py"
-  BOUNDARY="$ROOT/tools/data_boundary.py"
-fi
+GUARD="$_KIT/tools/pii_guard.py"
+BOUNDARY="$_KIT/tools/data_boundary.py"
 # FAIL CLOSED on a missing guard, same as the interpreter probe below and for the same reason:
 # `|| exit 0` meant deleting one file silently switched push protection off and printed nothing,
 # so a disarmed hook and a passing hook produced identical output. Demonstrated 2026-08-30 by
 # removing tools/pii_guard.py and watching a push carrying an address exit 0 in silence.
-if [ ! -f "$GUARD" ]; then
-  echo "BLOCKED: $GUARD is missing, so nothing is checking this push."
+if [ ! -f "$GUARD" ] || [ ! -s "$GUARD" ]; then
+  echo "BLOCKED: $GUARD is missing or empty, so nothing is checking this push."
   echo "Restore it with the pii-guard installer rather than pushing blind."
   exit 1
 fi
@@ -83,8 +73,8 @@ fi
 # The DATA BOUNDARY (see the note in pre-commit). Checked again at the push boundary, because this
 # is the last moment anything is still private -- and because a commit can arrive here without ever
 # passing pre-commit (a merge, a cherry-pick, a rebase, another clone, --no-verify).
-if [ ! -f "$BOUNDARY" ]; then
-  echo "BLOCKED: $BOUNDARY is missing, so the data boundary is not being checked."
+if [ ! -f "$BOUNDARY" ] || [ ! -s "$BOUNDARY" ]; then
+  echo "BLOCKED: $BOUNDARY is missing or empty, so the data boundary is not being checked."
   echo "Restore it with the pii-guard installer rather than pushing blind."
   exit 1
 fi

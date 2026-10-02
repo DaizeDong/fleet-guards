@@ -113,6 +113,32 @@ rather than part of this contract. Do not add them to satisfy a checker; nothing
 
 ## Verifying a companion
 
+Visibility evidence must be fresh and PRIVATE for every effective fetch and push URL, including
+Git URL rewrites. Canonical HTTPS URLs are supported. Canonical SSH URLs additionally require a
+recognized system or Git-bundled OpenSSH client and statically verifiable default configurations.
+The SSH policy permits client identity and authentication settings, and explicit `HostName github.com`,
+`User git`, and `Port 22`. Server authentication must use the default known-hosts files, with
+`StrictHostKeyChecking` absent or set to `yes` or `ask`. Disabling verification, automatically
+accepting new keys, or overriding either known-hosts file produces UNKNOWN; the static check
+cannot prove a custom trust file. Custom Git SSH commands or variants, remote helpers, remapped hosts,
+proxies, `Include`, `Match`, and other unsupported active options produce UNKNOWN. Configuration
+commands are never executed during this check. Use canonical HTTPS when an SSH configuration
+cannot be proven by this policy.
+
+The HTTPS policy checks both physical and effective Git configuration before granting PRIVATE
+admission. Default routing and certificate trust are supported, as is an explicitly enabled
+`http.sslVerify`. HTTP version, connection counts, buffering, low-speed limits, and keepalive
+tuning remain supported. Other HTTP options, including URL-scoped settings, remote proxies,
+custom TLS trust, resolver entries, redirects, and headers require transport proof that this
+static check does not provide, so they produce UNKNOWN. Every configuration occurrence is
+checked, including an override followed by an empty value.
+
+Proxy, certificate, TLS-backend, Git-helper, and HTTP request environment overrides likewise
+produce UNKNOWN for HTTPS. `no_proxy` alone and the Git low-speed environment settings do not
+alter this admission. The check never executes an override and never prints its value. Restore
+the standard HTTPS transport settings or use the separately verified SSH policy before retrying;
+a fresh visibility receipt alone cannot establish the destination of a modified connection.
+
 ```
 python tools/data_boundary.py                 # this repo holds no run output
 python tools/data_boundary.py --explain <name> ...   # would a given output name be recognised

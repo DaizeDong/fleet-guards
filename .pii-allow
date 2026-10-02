@@ -1,0 +1,1 @@
+.claude/scripts/synthetic_fixture.py # Synthetic path produced by tools/make_fixtures.py to test private-path detection; it does not identify an operator file.

@@ -79,6 +79,7 @@ Exit 0 = no blocking findings. Note that 0 does NOT mean silence: HISTORY-DEBT a
 Stdlib only.
 """
 import argparse
+import difflib
 import json
 import os
 import re
@@ -271,23 +272,6 @@ def is_scanner_content(rel, text):
     if text is None or os.path.basename(_norm_rel(rel)) not in SCANNER_FILES:
         return False
     return any(sig in text for sig in SCANNER_SIGNATURES)
-# The same exemption for the DIFF domains, DERIVED from SCANNER_PATHS so the two cannot drift.
-# They already had: `test_pii_guard_v2.py` went into SCANNER_FILES and not into this list, and
-# staging an edit to the vendored copy of that test was then blocked by the test's own synthetic
-# mailbox. Measured 2026-08-20 with a matched control: editing tools/test_pii_guard_v2.py blocked,
-# editing tools/test_pii_guard.py clean. Found by the self-evolve proposer.
-#
-# EXACT paths, not the `*basename` globs this used to use. A glob meant any file called
-# pii_guard.py anywhere was dropped from the staged and range scans, which is the same shadow the
-# tree domain had and the same reason it was closed there.
-#
-# Note the asymmetry with the tree and history domains, which additionally accept a copy at a
-# non-standard path that proves its identity by content. A diff does not carry a file's full
-# content, so identity-by-content is not available here; the diff domains use the vendored path
-# alone, which is the stricter of the two.
-#
-# Commit MESSAGES are scanned separately and unconditionally: no pathspec covers them.
-HISTORY_EXCLUDE = [":(exclude)" + p for p in sorted(SCANNER_PATHS)]
 BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".ico", ".woff", ".woff2",
               ".sqlite3", ".db", ".bundle", ".pack", ".webp", ".mp4", ".xlsx"}
 
@@ -297,6 +281,14 @@ class GitError(RuntimeError):
 
     Raised, never swallowed. See _run for why an exception and not an empty string.
     """
+
+
+def _git_env():
+    """Read original objects while preserving the caller's repository and selected index."""
+    env = os.environ.copy()
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
 
 
 def _run(args, cwd, allow_fail=False):
@@ -329,7 +321,7 @@ def _run(args, cwd, allow_fail=False):
     # bearing. dash_guard's runner already did this; this one was the outlier.
     try:
         p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", env=_git_env())
     except (OSError, ValueError) as e:
         if allow_fail:
             return None
@@ -368,7 +360,7 @@ def _repo_slug(root):
     """The origin remote parsed to (owner/name, name), both lowercased; ('', '') if there is no origin.
 
     Two callers need to identify the current repo from its origin URL: the per-repo denylist
-    exemption (keyed on owner/name) and the P1.5 self-exclusion (keyed on name). Kept in one place so
+    exemption and the P1.5 self-exclusion (both scoped to owner/name). Kept in one place so
     the parse cannot drift between them. NOTE: `git filter-repo` strips the origin remote, so inside a
     freshly-filtered bare clone this returns ('', '') -- self-exclusion then cannot fire and a repo's
     OWN `<name>-config` companion false-positives; re-add origin before scanning such a clone.
@@ -660,6 +652,17 @@ class Policy(object):
         return line
 
 
+def _optional_policy_exists(path):
+    """Only a missing file makes an optional policy layer uninitialized."""
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise PolicyError("cannot inspect %s: %s" % (path, error)) from None
+    return True
+
+
 def _read_json(path):
     """Read JSON, raising PolicyError on ANY failure. See PolicyError for why not `= []`."""
     try:
@@ -726,7 +729,7 @@ def _parse_denylist(path, notes=None):
             notes.append(_UNATTESTED_NOTE % path)
     elif isinstance(data, dict):
         fmt = data.get("format", 1)
-        if not isinstance(fmt, int) or fmt > POLICY_FORMAT_SUPPORTED:
+        if type(fmt) is not int or not 1 <= fmt <= POLICY_FORMAT_SUPPORTED:
             # Deliberately NOT "treat everything as secret, that is safer". A silent strictness
             # upgrade would hide the fact that this copy of the guard is older than the policy
             # it is reading, which is the exact condition under which a vendored copy in one of
@@ -743,6 +746,9 @@ def _parse_denylist(path, notes=None):
                 % (path, ", ".join(sorted(k for k in data)) or "nothing"))
         raw = data.get("tokens")
         declared_count = data.get("count")
+        if fmt >= 2 and type(declared_count) is not int:
+            raise PolicyError("%s: format %d requires an integer `count` to attest completeness"
+                              % (path, fmt))
         canary = data.get("canary") or (CANARY_TOKEN if fmt >= 2 else None)
         if notes is not None and canary is None and declared_count is None:
             notes.append(_UNATTESTED_NOTE % path)
@@ -797,7 +803,7 @@ def _parse_denylist(path, notes=None):
     else:
         toks_after_canary = toks
     if declared_count is not None:
-        if not isinstance(declared_count, int) or declared_count != len(toks):
+        if type(declared_count) is not int or declared_count != len(toks):
             raise PolicyError(
                 "%s declares count=%r but %d tokens loaded.\n"
                 "  Removing entries from a JSON array leaves valid JSON, so this mismatch is the\n"
@@ -885,7 +891,7 @@ def _load_visibility(vis_path=None, notes=None):
     an empty map -- which reads exactly like "you have no private repos".
     """
     path = vis_path or os.path.expanduser("~/.pii-guard/visibility.json")
-    if not os.path.exists(path):
+    if not _optional_policy_exists(path):
         # Absent is ORDINARY (CI, a contributor, a fresh machine) and it is also INVISIBLE unless
         # somebody says it. Without this note the cross-repo layer can be entirely missing -- a
         # failed refresh, a new machine, a repo not yet registered -- and the run still prints
@@ -986,12 +992,12 @@ def load_cross_repo_tokens(root, vis_path=None, notes=None):
     # Only the DERIVED downgrade depends on the map's freshness. The linkage verdicts do not: they
     # come from a repo being listed PRIVATE, and a stale map that still calls something private is
     # erring toward gating, which is the direction that costs an edit rather than a disclosure.
-    trust_map = age_s is not None and age_s <= VIS_MAX_AGE_S
+    trust_map = age_s is not None and 0 <= age_s <= VIS_MAX_AGE_S
     if notes is not None and age_s is not None:
         if not trust_map:
             notes.append(
                 "pii_guard: WARNING the visibility map is %.0f days old (limit %d). Derivability "
-                "rests on a claim that a parent repo is PUBLIC, and a claim that old is not "
+                "rests on a claim that a parent repo is PUBLIC; stale or future-dated claims are not "
                 "evidence, so every companion name is being treated as linkage and will gate. "
                 "Refresh it: python ~/.claude/scripts/pii-guard/refresh_visibility.py"
                 % (age_s / 86400.0, VIS_MAX_AGE_S // 86400))
@@ -999,9 +1005,10 @@ def load_cross_repo_tokens(root, vis_path=None, notes=None):
             notes.append("pii_guard: NOTE the visibility map is %.1f h old; the refresher runs "
                          "every 4 h, so it has missed several runs. Derivability still applies."
                          % (age_s / 3600.0))
-    _, self_name = _repo_slug(root)
-    out, seen = [], set()
-    for owner, name in private:
+    self_key, self_name = _repo_slug(root)
+    self_owner = self_key.rsplit("/", 1)[0] if "/" in self_key else ""
+    by_name = {}
+    for owner, name in sorted(private):
         # DISTINCTIVE slugs only. A private repo called `notes` would false-positive on the
         # English word, and a gate that cries wolf gets bypassed, at which point it guards
         # nothing anywhere. Require the companion suffix, or a multi-part slug that ordinary
@@ -1014,8 +1021,8 @@ def load_cross_repo_tokens(root, vis_path=None, notes=None):
         # produced no finding at all while an unrelated token in the same line did. The intent was
         # only ever "this repo's OWN companion", and that is a closed set: the repo name, or the
         # repo name plus one of the documented suffixes.
-        if self_name and (name == self_name
-                          or name in {self_name + suf for suf in CONVENTION_SUFFIXES}):
+        if self_owner == owner and self_name and (name == self_name
+                or name in {self_name + suf for suf in CONVENTION_SUFFIXES}):
             continue
         # DISTINCTIVENESS. `-config` was hardcoded here while CONVENTION_SUFFIXES lists four, so
         # `<something>-data` with a single hyphen never entered the layer at all: the derivability
@@ -1023,14 +1030,14 @@ def load_cross_repo_tokens(root, vis_path=None, notes=None):
         if not (name.endswith(CONVENTION_SUFFIXES)
                 or (name.count("-") + name.count("_")) >= 2):
             continue
-        if name in seen:
-            continue
-        seen.add(name)
         parent = derivation_witness(owner, name, public_by_owner) if trust_map else None
         kind = "derived" if parent else "linkage"
-        out.append(Token(name, kind, source="cross-repo",
-                         witness=("%s/%s is PUBLIC" % (owner, parent)) if parent else None))
-    return sorted(out, key=lambda t: t.value)
+        # A bare name is only derivable if every retained owner's instance is derivable.
+        # Otherwise that shared token must retain the stronger linkage jurisdiction.
+        if name not in by_name or kind == "linkage":
+            by_name[name] = Token(name, kind, source="cross-repo",
+                                 witness=("%s/%s is PUBLIC" % (owner, parent)) if parent else None)
+    return [by_name[name] for name in sorted(by_name)]
 
 
 def _exempt_path():
@@ -1129,12 +1136,12 @@ def load_policy(root=None, vis_path=None):
     _probe_matcher()
 
     path = _denylist_path()
-    if path and os.path.exists(path):
+    if path and _optional_policy_exists(path):
         pol.denylist_present = True
         pol.tokens.extend(_parse_denylist(path, pol.notes))
     if root:
         cross = load_cross_repo_tokens(root, vis_path, pol.notes)
-        pol.visibility_present = bool(cross) or os.path.exists(
+        pol.visibility_present = bool(cross) or _optional_policy_exists(
             vis_path or os.path.expanduser("~/.pii-guard/visibility.json"))
         have = {t.value for t in pol.tokens}
         pol.tokens.extend(t for t in cross if t.value not in have)
@@ -1214,7 +1221,22 @@ def email_ok(addr, allow):
             or bool(ALLOWED_EMAIL_DOMAIN_RE.match(dom)))
 
 
-def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, strict=None):
+def _path_mailbox(addr, allow):
+    """Recognize personal mailbox boundaries before filename-suffix exemptions."""
+    if addr.lower() in allow:
+        return addr
+    local, _, domain = addr.rpartition("@")
+    for known in sorted(PERSONAL_MAIL_DOMAINS | ALLOWED_EMAIL_DOMAINS, key=len, reverse=True):
+        if domain.lower().startswith(known + "."):
+            mailbox = local + "@" + known
+            if known in PERSONAL_MAIL_DOMAINS and local.lower() not in PLACEHOLDER_LOCAL_PARTS:
+                return mailbox
+            return addr if email_ok(addr, allow) else mailbox
+    return addr
+
+
+def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, strict=None,
+              path_text=False):
     """Append findings for one chunk of text.
 
     A finding is (where, label, value, severity). Severity is decided by the JURISDICTION
@@ -1253,6 +1275,10 @@ def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, stri
         for addr in set(EMAIL_RE.findall(text)):
             if addr.lower() in allow:
                 continue
+            if path_text:
+                addr = _path_mailbox(addr, allow)
+                if addr.lower() in allow:
+                    continue
             local, _, dom = addr.lower().rpartition("@")
             if dom in PERSONAL_MAIL_DOMAINS and local not in PLACEHOLDER_LOCAL_PARTS:
                 structural.append(("PERSONAL-MAILBOX", addr))   # a real person: never, anywhere
@@ -1306,39 +1332,23 @@ def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, stri
 
 
 
-def _in_submodule(root, rel, _cache={}):
-    """Is `rel` inside a git submodule of `root`?
+def _submodule_paths(root):
+    """Submodule identity comes from gitlink entries, never a worktree marker file."""
+    result = set()
+    for entry in _run(["git", "ls-files", "--stage", "-z"], root).split("\0"):
+        if entry:
+            metadata, path = entry.split("\t", 1)
+            mode, _sha, stage = metadata.split()
+            if mode == "160000" and stage == "0":
+                result.add(path)
+    return result
 
-    A submodule is skipped for a reason that is NOT "we do not want to look": it is a separate
-    repository with its own remote, its own hooks and its own CI, and it is scanned there. Scanning
-    it from a consumer also fails on Windows, because git gives a submodule directory an entry a
-    plain walk cannot read. That produced a PermissionError and the honest but useless line "1 item
-    was NOT examined, so this is not a clean bill of health" on EVERY commit in EVERY consuming
-    repo. That line is a rare and important signal, and making it routine is how people learn to
-    scroll past it.
 
-    DETECTED BY SHAPE, NOT BY NAME. This was a hardcoded {"guards"} until a second kit was split out
-    and every consumer grew a `style/` directory, at which point the same useless line came back
-    everywhere. A name list is a list of the submodules somebody remembered; the next one is silent
-    again. `.git` as a FILE rather than a directory is git's own marker for "this worktree belongs
-    to a parent", and it needs no maintenance.
-
-    Cached per root: this runs once per tracked file and the answer cannot change mid-scan.
-    """
-    key = os.path.realpath(root)
-    subs = _cache.get(key)
-    if subs is None:
-        subs = set()
-        try:
-            for name in os.listdir(root):
-                if os.path.isfile(os.path.join(root, name, ".git")):
-                    subs.add(name)
-        except OSError:
-            pass                      # unreadable root: report nothing skipped, let the scan try
-        _cache[key] = subs
-    if not subs:
-        return False
-    return rel.split("/", 1)[0] in subs
+def _in_submodule(root, rel, submodules=None):
+    """Recognize top-level or nested gitlinks without caching across scans."""
+    if submodules is None:
+        submodules = _submodule_paths(root)
+    return any(rel == path or rel.startswith(path + "/") for path in submodules)
 
 
 def tracked_files(root):
@@ -1364,40 +1374,51 @@ _BOM_LE = bytes([0xFF, 0xFE])
 _BOM_BE = bytes([0xFE, 0xFF])
 
 
-def _decode_best(data):
-    """(text, encoding) for scanning purposes, or (None, None) if it is genuinely binary.
+def _decode_candidates(data):
+    """Return all plausible text interpretations and an encoding description.
 
-    A tracked file that is not valid UTF-8 used to be recorded as unreadable and then skipped,
-    while the summary still said `clean`. But "not UTF-8" is not "not text": a file saved by a
-    Windows editor as UTF-16 or in a legacy code page is perfectly readable prose, it is pushed to
-    GitHub like anything else, and a mailbox inside it is exactly as public. Measured 2026-08-20:
-    a UTF-16 file was invisible in every domain at once -- the tree skipped it on a decode error
-    and git marks it binary in diffs, so staged and range saw nothing either.
-
-    UTF-16 is detected by BOM or by the NUL density that interleaved ASCII produces; cp1252 is the
-    last resort because it decodes almost anything, so it is tried only after the others fail.
+    A BOM establishes UTF-16 byte order. Without one, interleaved NULs are evidence for UTF-16
+    but printability cannot decide its byte order: swapped ASCII can also be printable Unicode.
+    Keep both plausible interpretations so that choosing one cannot erase an identifier.
     """
     if not data:
-        return "", "empty"
-    if data[:2] in (_BOM_LE, _BOM_BE) or data.count(_NUL) > len(data) // 8:
-        for enc in ("utf-16", "utf-16-le", "utf-16-be"):
+        return ("",), "empty"
+    if data[:2] in (_BOM_LE, _BOM_BE):
+        try:
+            text = data.decode("utf-16")
+        except UnicodeDecodeError:
+            return (), None
+        return ((text,), "utf-16") if _looks_like_text(text) else ((), None)
+    if _NUL in data:
+        # Parity orders the candidates for diagnostics; it never discards the other byte order.
+        encodings = ["utf-16-le", "utf-16-be"]
+        if data[::2].count(_NUL) > data[1::2].count(_NUL):
+            encodings.reverse()
+        candidates, detected = [], []
+        for enc in [*encodings, "utf-8"]:
             try:
                 text = data.decode(enc)
-            except (UnicodeDecodeError, ValueError):
+            except UnicodeDecodeError:
                 continue
-            if _looks_like_text(text):
-                return text, enc
+            if _looks_like_text(text) and text not in candidates:
+                candidates.append(text)
+                detected.append(enc)
+        return tuple(candidates), "+".join(detected) if candidates else None
     try:
-        return data.decode("utf-8"), "utf-8"
+        return (data.decode("utf-8"),), "utf-8"
     except UnicodeDecodeError:
         pass
-    if _NUL in data:
-        return None, None                 # embedded NULs and not UTF-16: a binary file
     try:
         text = data.decode("cp1252")
     except UnicodeDecodeError:
-        return None, None
-    return (text, "cp1252") if _looks_like_text(text) else (None, None)
+        return (), None
+    return ((text,), "cp1252") if _looks_like_text(text) else ((), None)
+
+
+def _decode_best(data):
+    """Compatibility text view; incremental scans compare candidates separately."""
+    texts, encoding = _decode_candidates(data)
+    return ("\n".join(texts), encoding) if texts else (None, None)
 
 
 def _looks_like_text(text):
@@ -1435,6 +1456,8 @@ def scan_tree(root, allow, pol, files=None, stats=None):
     out = []
     counts = {"enumerated": 0, "scanned": 0, "skipped_dir": 0, "skipped_binary_ext": 0,
               "unreadable": [], "recoded": []}
+    # An explicit file list is scanned as supplied; arbitrary filesystem markers cannot hide it.
+    submodules = _submodule_paths(root) if files is None else set()
     for rel in (tracked_files(root) if files is None else files):
         # NOT rel.strip(). `tracked_files` uses `git ls-files -z`, whose separator is unambiguous,
         # and its own docstring says so -- but this loop kept trimming anyway, which is the same
@@ -1450,7 +1473,9 @@ def scan_tree(root, allow, pol, files=None, stats=None):
         if not rel:
             continue
         counts["enumerated"] += 1
-        if any(part in SKIP_DIR for part in rel.split("/")) or _in_submodule(root, rel):
+        # Published names are text even when their bodies are binary, excluded, or unreadable.
+        scan_text(rel, "%s (path)" % rel, allow, pol, out, domain="tree", path_text=True)
+        if any(part in SKIP_DIR for part in rel.split("/")) or _in_submodule(root, rel, submodules):
             counts["skipped_dir"] += 1
             continue
         if os.path.splitext(rel)[1].lower() in BINARY_EXT:
@@ -1463,22 +1488,18 @@ def scan_tree(root, allow, pol, files=None, stats=None):
         except OSError as e:
             counts["unreadable"].append((rel, type(e).__name__))
             continue
-        text, enc = _decode_best(raw)
-        if text is None:
+        texts, enc = _decode_candidates(raw)
+        if not texts:
             counts["unreadable"].append((rel, "binary"))
             continue
         if enc not in ("utf-8", "empty"):
             counts["recoded"].append((rel, enc))
         counts["scanned"] += 1
-        deny_only = is_scanner_path(rel) or is_scanner_content(rel, text)
-        # THE PATH ITSELF. Only file CONTENT was ever scanned, so a real name, a real address or a
-        # real account in a FILE OR DIRECTORY NAME was invisible in the tree domain entirely -- and
-        # a filename is as public as the bytes inside it.
-        scan_text(rel, "%s (path)" % rel, allow, pol, out, domain="tree")
-        lines = text.splitlines(True)
-        for i, line in enumerate(lines, 1):
-            scan_text(line, "%s:%d" % (rel, i), allow, pol, out,
-                      domain="tree", deny_only=deny_only)
+        for text in texts:
+            deny_only = is_scanner_path(rel) or is_scanner_content(rel, text)
+            for i, line in enumerate(text.splitlines(True), 1):
+                scan_text(line, "%s:%d" % (rel, i), allow, pol, out,
+                          domain="tree", deny_only=deny_only)
     if stats is not None:
         stats.update(counts)
     return out
@@ -1488,7 +1509,7 @@ def _run_stdin(args, cwd, payload):
     """Like _run, but feeds stdin and returns BYTES. Blobs are not necessarily text."""
     try:
         p = subprocess.run(args, cwd=cwd, input=payload.encode("utf-8"),
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_git_env())
     except OSError as e:
         raise GitError("cannot execute `%s` in %s: %s" % (" ".join(args), cwd, e)) from None
     if p.returncode != 0:
@@ -1507,11 +1528,64 @@ MAX_BLOB_BYTES = 8 * 1024 * 1024
 
 def _blank_history_stats():
     return {"blobs_total": 0, "blobs_scanned": 0, "blobs_binary": 0, "blobs_recoded": [],
-            "blobs_oversize": [], "commits": 0}
+            "blobs_oversize": [], "commits": 0, "trees_scanned": 0,
+            "tags_scanned": 0, "refs_scanned": 0}
+
+
+def _scan_tag_object(root, oid, size, allow, pol, out):
+    """Inspect published tag headers, annotation, and tagger identity."""
+    if size > MAX_BLOB_BYTES:
+        raise GitError("tag metadata exceeds the scan limit: " + oid)
+    body = _run_stdin(["git", "cat-file", "tag", oid], root, "")
+    texts, _encoding = _decode_candidates(body)
+    if not texts:
+        raise GitError("tag metadata could not be decoded: " + oid)
+    for text in texts:
+        where = "<tag object %s>" % oid[:8]
+        scan_text(text, where, allow, pol, out, domain="history")
+        headers = text.split("\n\n", 1)[0]
+        for line in headers.splitlines():
+            if line.startswith("tagger "):
+                identity = re.search(r"<([^<>]+)>\s+-?\d+\s+[+-]\d{4}$", line)
+                if identity is None:
+                    raise GitError("tagger identity could not be parsed: " + oid)
+                email = identity.group(1)
+                if not ALLOWED_AUTHOR_EMAIL_RE.search(email):
+                    out.append((where, "TAGGER-EMAIL", email, "BLOCK"))
+
+
+def _batch_object_header(line):
+    """Validate one complete cat-file object header."""
+    try:
+        fields = line.decode("ascii").split(" ")
+    except UnicodeDecodeError:
+        raise GitError("cat-file returned a non-ASCII object header") from None
+    if (len(fields) != 3
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", fields[0]) is None
+            or fields[1] not in {"blob", "tree", "commit", "tag"}
+            or re.fullmatch(r"[0-9]+", fields[2]) is None):
+        raise GitError("cat-file returned an invalid object header")
+    try:
+        size = int(fields[2])
+    except ValueError:
+        raise GitError("cat-file returned an invalid object size") from None
+    return fields[0], fields[1], size
+
+
+def _batch_object_metadata(raw, requested, resolve=False):
+    """Reconcile batch-check responses with the complete request population."""
+    lines = raw.split(b"\n")
+    if not lines or lines[-1] != b"" or len(lines) - 1 != len(requested):
+        raise GitError("cat-file batch-check returned an incomplete object population")
+    records = [_batch_object_header(line) for line in lines[:-1]]
+    if not resolve and ([record[0] for record in records] != requested
+                        or len(set(requested)) != len(requested)):
+        raise GitError("cat-file batch-check returned inconsistent object identities")
+    return records
 
 
 def _scan_object_graph(root, allow, pol, out, rev_args, stats, where_prefix):
-    """Scan every BLOB reachable in `rev_args`, by walking the object graph.
+    """Scan reachable blobs, tag metadata, and every tree path in `rev_args`.
 
     WHY NOT `git log -p` -- this is the entire point of the function
     ----------------------------------------------------------------
@@ -1530,36 +1604,64 @@ def _scan_object_graph(root, allow, pol, out, rev_args, stats, where_prefix):
     an agent to paste something in by hand.
 
     The object graph has no such gap by construction: the scan is defined over the set of objects
-    git will actually transmit, rather than over a view of them. It is also FASTER than the diff
-    stream (0.245s vs 0.332s on the largest repo in this fleet), because each blob is visited once
-    instead of once per commit that touched it.
+    git will actually transmit, rather than over a view of them. Blob bodies are read once;
+    committed root trees and directly referenced trees supply every historical path alias.
     """
-    named = {}
-    listing = _run(["git", "rev-list", "--objects"] + rev_args, root)
-    for line in listing.splitlines():
-        sha, _, path = line.partition(" ")
-        if sha and sha not in named:
-            named[sha] = path.strip()
-    if not named:
+    # rev-list gives one arbitrary name per object; it cannot enumerate aliases. Walk each
+    # root tree with NUL separators, including directory and gitlink names. A peeled tree ref
+    # is a root even without a commit; internal subtrees are not independent root aliases.
+    aliases = {}
+    paths_seen = set()
+    trees = set(_run(["git", "log", "--format=%T"] + rev_args, root).split())
+    refs = _run(["git", "rev-parse", "--revs-only"] + rev_args, root).split()
+    if refs:
+        targets = _run_stdin(["git", "cat-file", "--batch-check", "--buffer"], root,
+                             "\n".join(ref + "^{}" for ref in refs) + "\n")
+        for oid, kind, _size in _batch_object_metadata(targets, refs, resolve=True):
+            if kind == "tree":
+                trees.add(oid)
+    for tree in sorted(trees):
+        entries = _run(["git", "ls-tree", "-r", "-t", "-z", "--full-tree", tree], root)
+        for entry in entries.split("\0"):
+            if not entry:
+                continue
+            header, path = entry.split("\t", 1)
+            _mode, kind, sha = header.split()
+            if path not in paths_seen:
+                scan_text(path, "%s%s (path)" % (where_prefix, path), allow, pol, out,
+                          domain="history", path_text=True)
+                paths_seen.add(path)
+            if kind == "blob":
+                aliases.setdefault(sha, set()).add(path)
+        stats["trees_scanned"] += 1
+    # Keep body coverage for objects reachable through refs that have no committed path.
+    objects = _run(["git", "rev-list", "--objects", "--no-object-names"] + rev_args, root).split()
+    if not objects:
         return
 
     # --batch-check first, so an enormous blob is never materialised only to be skipped.
     meta = _run_stdin(["git", "cat-file", "--batch-check", "--buffer"], root,
-                      "\n".join(named) + "\n").decode("utf-8", "replace")
+                      "\n".join(objects) + "\n")
     wanted = []
-    for line in meta.splitlines():
-        parts = line.split()
-        if len(parts) != 3 or parts[1] != "blob":
+    sizes = {}
+    for sha, kind, size in _batch_object_metadata(meta, objects):
+        if kind == "tag":
+            _scan_tag_object(root, sha, size, allow, pol, out)
+            stats["tags_scanned"] += 1
             continue
-        sha, size = parts[0], int(parts[2])
-        path = named.get(sha, "")
+        if kind != "blob":
+            continue
+        paths = sorted(aliases.get(sha, {"<unnamed blob %s>" % sha[:8]}))
         stats["blobs_total"] += 1
-        if os.path.splitext(path)[1].lower() in BINARY_EXT:
+        eligible = [path for path in paths if os.path.splitext(path)[1].lower() not in BINARY_EXT]
+        if not eligible:
             continue
         if size > MAX_BLOB_BYTES:
-            stats["blobs_oversize"].append((path or sha[:8], size))
+            stats["blobs_oversize"].append((eligible[0], size))
             continue
+        aliases[sha] = eligible
         wanted.append(sha)
+        sizes[sha] = size
     if not wanted:
         return
 
@@ -1568,34 +1670,39 @@ def _scan_object_graph(root, allow, pol, out, rev_args, stats, where_prefix):
     # splitting on newlines: blob content contains newlines, and a parser that guesses where a
     # record ends would resynchronise onto content and silently skip whatever came after it.
     i, n = 0, len(raw)
-    while i < n:
+    for expected in wanted:
         nl = raw.find(b"\n", i)
         if nl < 0:
-            break
-        header = raw[i:nl].decode("utf-8", "replace").split()
+            raise GitError("cat-file batch returned a missing object header")
+        sha, kind, size = _batch_object_header(raw[i:nl])
+        if sha != expected or kind != "blob" or size != sizes[expected]:
+            raise GitError("cat-file batch returned inconsistent object metadata")
         i = nl + 1
-        if len(header) != 3 or header[1] != "blob":
-            break
-        sha, size = header[0], int(header[2])
-        body, i = raw[i:i + size], i + size + 1
-        path = named.get(sha) or ("<unnamed blob %s>" % sha[:8])
-        text, enc = _decode_best(body)
-        if text is None:
+        end = i + size
+        if end >= n or raw[end:end + 1] != b"\n":
+            raise GitError("cat-file batch returned an incomplete object body")
+        body, i = raw[i:end], end + 1
+        paths = aliases[sha]
+        texts, enc = _decode_candidates(body)
+        if not texts:
             stats["blobs_binary"] += 1
             continue
         if enc not in ("utf-8", "empty"):
-            stats["blobs_recoded"].append((path, enc))
+            stats["blobs_recoded"].append((paths[0], enc))
         stats["blobs_scanned"] += 1
-        # The guard's own files are DENY-ONLY here as in the tree, not skipped: they have to contain
-        # the shapes they detect, but the private denylist must still fire on them, or renaming a
-        # file would be a hole straight through the gate.
-        deny_only = is_scanner_path(path) or is_scanner_content(path, text)
-        scan_text(text, "%s%s" % (where_prefix, path), allow, pol, out,
-                  domain="history", deny_only=deny_only)
+        for text in texts:
+            # A scanner alias must not grant an exemption to an ordinary text alias.
+            ordinary = [path for path in paths
+                        if not (is_scanner_path(path) or is_scanner_content(path, text))]
+            path = (ordinary or paths)[0]
+            scan_text(text, "%s%s" % (where_prefix, path), allow, pol, out,
+                      domain="history", deny_only=not ordinary)
+    if i != n:
+        raise GitError("cat-file batch returned unrequested trailing data")
 
 
 def scan_history(root, allow, pol, stats=None):
-    """Every blob, every commit message, every author/committer line reachable from any ref.
+    """Reachable content and metadata, including tag objects and current reference names.
 
     This is the check whose absence let five 'fixed' leaks stay live on GitHub: the tree was clean
     and the commit that introduced the PII was never touched.
@@ -1603,12 +1710,13 @@ def scan_history(root, allow, pol, stats=None):
     out = []
     if stats is None:
         stats = _blank_history_stats()
-    if not _has_commits(root):
-        # The one git failure in here that is a STATE, not a breakage. Say it out loud: a repo with
-        # no commits gives an empty history scan, and an empty scan must never read as a clean one.
-        print("pii_guard: NOTE %s has no commits yet -- the history scan examined nothing." % root,
-              file=sys.stderr)
-        return out
+    for ref in _run(["git", "for-each-ref", "--format=%(refname)"], root).splitlines():
+        # Ref names are currently published names, not historical prose.
+        scan_text(ref, "<reference name>", allow, pol, out, domain="tree", path_text=True)
+        stats["refs_scanned"] += 1
+    # --all enumerates reachable refs even when HEAD names an unborn branch. A tag may also
+    # retain a blob without any commit, so only the object walk can establish an empty scan.
+    stats["commits"] = len(_run(["git", "rev-list", "--all"], root).split())
     for ident in set(_run(["git", "log", "--all", "--format=%ae%n%ce"], root).split()):
         if ident and not ALLOWED_AUTHOR_EMAIL_RE.search(ident):
             out.append(("<commit author/committer>", "AUTHOR-EMAIL", ident, "BLOCK"))
@@ -1616,82 +1724,105 @@ def scan_history(root, allow, pol, stats=None):
     # touched only excluded files -- and its message with it. (`Co-Authored-By: <real gmail>` is a
     # message-only leak; that is not hypothetical, it happened.)
     msgs = _run(["git", "log", "--all", "--format=%s%n%b"], root)
-    stats["commits"] = len(_run(["git", "rev-list", "--all"], root).split())
     if msgs:
         scan_text(msgs, "<commit message>", allow, pol, out, domain="history")
     _scan_object_graph(root, allow, pol, out, ["--all"], stats, "<blob> ")
+    if not (stats["commits"] or stats["blobs_total"] or stats["trees_scanned"] or stats["tags_scanned"]):
+        print("pii_guard: NOTE %s has no reachable commits, trees, or blobs -- the history scan examined nothing." % root,
+              file=sys.stderr)
     return out
 
 
+def _commit_files(root, commit):
+    """Map exact NUL-delimited paths to (object type, object ID)."""
+    result = {}
+    listing = _run(["git", "ls-tree", "-r", "-z", "--full-tree", commit], root)
+    for entry in listing.split("\0"):
+        if entry:
+            metadata, path = entry.split("\t", 1)
+            _mode, kind, oid = metadata.split()
+            result[path] = (kind, oid)
+    return result
+
+
+def _blob_texts(root, oid, cache):
+    """Decode object bytes before diffing; retain ambiguity and remove editor BOMs."""
+    if oid not in cache:
+        data = _run_stdin(["git", "cat-file", "blob", oid], root, "")
+        texts, _encoding = _decode_candidates(data)
+        cache[oid] = tuple(text[1:] if text.startswith("\ufeff") else text for text in texts)
+    return cache[oid]
+
+
+def _added_line_indices(before, after):
+    """Return new-side line indices for inserted and replaced decoded text."""
+    return {i for tag, _old_start, _old_end, start, end in
+            difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes()
+            if tag in ("insert", "replace") for i in range(start, end)}
+
+
+def _scan_changed_files(root, files, parents, allow, pol, out, where, domain):
+    """Scan new path names and lines new relative to every parent at that path."""
+    cache = {}
+    for path, entry in files.items():
+        if any(parent.get(path) == entry for parent in parents):
+            continue
+        if domain == "staged" or all(path not in parent for parent in parents):
+            scan_text(path, "%s %s (path)" % (where, path), allow, pol, out,
+                      domain=domain, path_text=True)
+        kind, oid = entry
+        if kind != "blob":
+            continue
+        for content in _blob_texts(root, oid, cache):
+            lines = content.splitlines()
+            added = set(range(len(lines)))
+            for parent in parents:
+                previous = parent.get(path)
+                old_texts = (_blob_texts(root, previous[1], cache)
+                             if previous and previous[0] == "blob" else ())
+                # A line already present under any plausible old decoding is not newly added.
+                for old_text in old_texts or ("",):
+                    added.intersection_update(_added_line_indices(old_text.splitlines(), lines))
+                if not added:
+                    break
+            deny_only = is_scanner_path(path) or is_scanner_content(path, content)
+            for index in sorted(added):
+                scan_text(lines[index], where + " " + path, allow, pol, out,
+                          domain=domain, deny_only=deny_only)
+
+
+def _scan_commit_changes(root, commit, allow, pol, out, where):
+    """Compare decoded commit blobs with all parents, including root commits."""
+    parent_ids = _run(["git", "rev-list", "--parents", "-n", "1", commit], root).split()[1:]
+    parents = [_commit_files(root, parent) for parent in parent_ids] or [{}]
+    files = _commit_files(root, commit)
+    _scan_changed_files(root, files, parents, allow, pol, out, where, "range")
+
+
 def _scan_merge_resolutions(root, allow, pol, out, rev_args, where):
-    """Scan what a MERGE COMMIT introduced that came from neither parent.
-
-    The push-range scan reads added lines out of `git log -p`, and git prints no patch for a merge.
-    So the one place a person types content by hand during a merge produced a diff of nothing.
-
-    `--cc` is the right tool: a combined diff shows only the lines differing from ALL parents,
-    which is the definition of "the resolver wrote this". The prefix is one column per parent, so a
-    line the resolution added is a run of '+' as wide as the parent count.
-
-    WHY THIS IS NOT THE OBJECT-GRAPH FIX, which the history domain uses instead: the object graph
-    reads whole blobs, and a whole blob contains lines that were already there. In the history
-    domain that is right and harmless, because a pre-existing linkage hit lands in the DEBT bucket.
-    In the push-range domain it would be a disaster -- editing line 99 of a file whose line 5 has
-    long held an accepted token would re-block the push, and blocking somebody for content they did
-    not touch is the deadlock this redesign exists to remove. So the range domain stays
-    additions-only, and this closes the merge hole without widening the rule.
-    """
-    shas = [s for s in _run(["git", "rev-list", "--merges"] + rev_args, root).split() if s]
-    for sha in shas:
-        parents = _run(["git", "rev-list", "--parents", "-n", "1", sha], root).split()
-        nparents = max(1, len(parents) - 1)
-        text = _run(["git", "show", "--cc", "--text", "--format=%n", sha], root)
-        for line in text.splitlines():
-            head = line[:nparents]
-            if len(head) == nparents and "+" in head and set(head) <= set("+ "):
-                scan_text(line[nparents:], where, allow, pol, out, domain="range")
+    """Scan lines added relative to every merge parent, with per-file scanner exemptions."""
+    commits = _run(["git", "rev-list", "--merges"] + rev_args, root).split()
+    for commit in commits:
+        _scan_commit_changes(root, commit, allow, pol, out, where)
 
 
 def scan_range(root, allow, pol, rev_range):
-    """Scan ONLY the commits about to be published: their diffs, messages and author lines.
+    """Scan added lines, messages and identities in only the commits about to be published.
 
-    This is what the machine-wide pre-push hook uses, and the scope is the whole point of it. A
-    full-history scan is right for a repo you own and have cleaned. It is useless on a FORK of an
-    upstream project: thousands of other people's mailboxes sit in that history, the guard would be
-    permanently red, and a permanently red guard gets bypassed -- so the one place an agent is most
-    likely to publish something (a PR to someone else's project) would end up the least guarded.
-
-    Scanning the push range instead asks the only question that is actually yours to answer: is
-    there private data in what YOU are adding?
+    Old accepted content and removals are not new disclosures. Decoded blobs establish scanner
+    identity and line differences. A merge line must be new relative to every parent. Paths absent
+    from every parent are new disclosures too, including gitlinks and rename destinations.
     """
     out = []
     args = rev_range.split()
-    msgs = _run(["git", "log", "--format=%s%n%b"] + args, root)
-    if msgs:
-        scan_text(msgs, "<commit message (being pushed)>", allow, pol, out, domain="range")
-    for ident in set(_run(["git", "log", "--format=%ae%n%ce"] + args, root).split()):
-        if ident and not ALLOWED_AUTHOR_EMAIL_RE.search(ident):
-            out.append(("<commit author (being pushed)>", "AUTHOR-EMAIL", ident, "BLOCK"))
-    diff = _run(["git", "log", "-p", "--text", "--format=%n"] + args + ["--"] + HISTORY_EXCLUDE, root)
-    if diff:
-        # ADDED lines only, matching scan_staged. Scanning the whole diff text also reads the
-        # REMOVED lines, and a removed line is the opposite of a leak: it is the fix.
-        #
-        # That made a deadlock, hit for real on 2026-08-20. A public repo contained an identifier
-        # that had become a denylist token after the fact. Deleting the line was the correct fix,
-        # and the commit that deleted it could not be pushed, because its own diff still contained
-        # the string on a "-" line. Leaving it was also blocked, since the pre-commit tree scan saw
-        # it in the working tree. Every route was closed and the only remaining doors were
-        # --no-verify or rewriting history over a one-line edit.
-        #
-        # History is still scanned in full by scan_history, which is the right place to ask "does
-        # this string exist anywhere in the past". This function asks a narrower question: is there
-        # private data in what you are ADDING.
-        for line in diff.splitlines():
-            if line.startswith("+") and not line.startswith("+++"):
-                scan_text(line[1:], "<diff (being pushed)>", allow, pol, out, domain="range")
-    # git prints no patch for a merge commit, so everything above sees nothing at all for the one
-    # moment a person types content by hand mid-merge. Combined diffs cover exactly that.
+    messages = _run(["git", "log", "--format=%s%n%b"] + args, root)
+    if messages:
+        scan_text(messages, "<commit message (being pushed)>", allow, pol, out, domain="range")
+    for identity in set(_run(["git", "log", "--format=%ae%n%ce"] + args, root).split()):
+        if identity and not ALLOWED_AUTHOR_EMAIL_RE.search(identity):
+            out.append(("<commit author (being pushed)>", "AUTHOR-EMAIL", identity, "BLOCK"))
+    for commit in _run(["git", "rev-list", "--no-merges"] + args, root).split():
+        _scan_commit_changes(root, commit, allow, pol, out, "<diff (being pushed)>")
     _scan_merge_resolutions(root, allow, pol, out, args, "<merge resolution (being pushed)>")
     return out
 
@@ -1709,13 +1840,20 @@ def scan_staged(root, allow, pol):
     including forks and research code, and a gate that nags there is a gate that gets bypassed.
     """
     out = []
-    # --text: a repo can declare `*.md -diff` in .gitattributes, and git then refuses to produce a
-    # patch for those files ("Binary files differ"). The content is still committed and still
-    # pushed; only the scanner would have gone blind. --text forces the patch.
-    diff = _run(["git", "diff", "--cached", "--unified=0", "--text", "--"] + HISTORY_EXCLUDE, root)
-    for line in (diff or "").splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
-            scan_text(line[1:], "<staged>", allow, pol, out, domain="staged")
+    # Object bytes are authoritative even when attributes suppress a Git patch or the working
+    # copy has been cleaned. Decode before comparing to preserve addition-only scope in UTF-16.
+    # Git supplies the staged path set so intent-to-add entries are not treated as staged files.
+    paths = set(_run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRT",
+                      "--no-renames", "-z", "--"], root).split("\0"))
+    files = {}
+    for entry in _run(["git", "ls-files", "--stage", "-z"], root).split("\0"):
+        if entry:
+            metadata, path = entry.split("\t", 1)
+            mode, oid, stage = metadata.split()
+            if stage == "0" and path in paths:
+                files[path] = ("commit" if mode == "160000" else "blob", oid)
+    parent = _commit_files(root, "HEAD") if _has_commits(root) else {}
+    _scan_changed_files(root, files, [parent], allow, pol, out, "<staged>", "staged")
     return out
 
 
@@ -1845,7 +1983,7 @@ def main():
     ap = argparse.ArgumentParser(description="Structural allowlist PII guard for public repos.")
     ap.add_argument("--repo", default=".")
     ap.add_argument("--tree", action="store_true", help="scan the git-tracked working tree")
-    ap.add_argument("--history", action="store_true", help="scan every commit: blobs, messages, authors")
+    ap.add_argument("--history", action="store_true", help="scan reachable content, identities, tag metadata and ref names")
     ap.add_argument("--range", dest="rev_range", default=None,
                     help="scan only the commits in this rev-range (e.g. 'abc..def', or "
                          "'<sha> --not --remotes'). Used by the machine-wide pre-push hook.")
@@ -1871,7 +2009,7 @@ def main():
             print("pii_guard: WARNING %s is a git repo but tracks 0 files -- nothing was examined.\n"
                   "  A clean result here means 'there was nothing to scan', not 'the content is "
                   "clean'." % root, file=sys.stderr)
-        findings += scan_tree(root, allow, pol, files=files, stats=tree_stats)
+        findings += scan_tree(root, allow, pol, stats=tree_stats)
     if a.history:
         findings += scan_history(root, allow, pol, stats=hist_stats)
     if a.rev_range:
@@ -1945,8 +2083,9 @@ def main():
                 tree_stats.get("enumerated", 0) - tree_stats.get("scanned", 0))
         layer = "" if pol.denylist_present else "  [private denylist: absent, layer not loaded]"
         if a.history:
-            detail += "  [%d commit(s), %d blob(s) scanned]" % (hist_stats.get("commits", 0),
-                                                                hist_stats.get("blobs_scanned", 0))
+            detail += "  [%d commit(s), %d blob(s) scanned; %d tag(s), %d ref name(s) scanned]" % (
+                hist_stats.get("commits", 0), hist_stats.get("blobs_scanned", 0),
+                hist_stats.get("tags_scanned", 0), hist_stats.get("refs_scanned", 0))
         if unexamined:
             # The word `clean` is reserved for a run that read everything it enumerated. This is
             # the whole distinction between "checked and found nothing" and "did not look".

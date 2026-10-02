@@ -32,7 +32,11 @@ to that commit in a separate commit.
    Set `core.hooksPath` to `.githooks`, never directly to the submodule directory.
    Commit both shims with executable Git mode `100755`; on Windows use
    `git add --chmod=+x .githooks/pre-commit .githooks/pre-push`. Synchronization
-   checks both the Git mode and the runner's executable permission before committing.
+    checks both the Git mode and the runner's executable permission before committing.
+    If the consumer also needs the optional machine-level commit-message rule, install the
+    `.githooks/commit-msg` shim from the [installation instructions](../README.md#install),
+    with executable Git mode `100755`. This optional shim does not change the two required
+    security shims or their directory.
 3. Copy `guards/templates/fleet-sync.yml` to `.github/workflows/fleet-sync.yml`
    and commit it on the consumer's default branch. Adjust the copy source if
    the guard submodule has another path. The job runs on `ubuntu-latest` unless
