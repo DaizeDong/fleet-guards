@@ -85,6 +85,20 @@ runs:
           echo "::error::the guards submodule has no test_ssh_transport.py"; exit 1; }
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_ssh_transport.py" -q
 
+    - name: SSH alias tests (does each alias prove its actual destination?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_ssh_alias.py" || {
+          echo "::error::the guards submodule has no test_ssh_alias.py"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_ssh_alias.py" -q
+
+    - name: Windows Git TLS tests (are package defaults and unsafe overrides distinguished?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_windows_git_tls.py" || {
+          echo "::error::the guards submodule has no test_windows_git_tls.py"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_windows_git_tls.py" -q
+
     - name: Fleet synchronization tests (do consumers advance only to verified revisions?)
       shell: bash
       run: |

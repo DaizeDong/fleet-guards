@@ -283,6 +283,10 @@ class GitError(RuntimeError):
     """
 
 
+class ScanIncompleteError(RuntimeError):
+    """Required content was enumerated but could not be fully scanned."""
+
+
 def _git_env():
     """Read original objects while preserving the caller's repository and selected index."""
     env = os.environ.copy()
@@ -570,10 +574,11 @@ class Policy(object):
         happens to be `derived` while the shorter is `secret`, answering from the alternation
         alone would silently DOWNGRADE a real finding. Prefilter, then confirm.
 
-        Two patterns because _deny_hit has two modes and they must agree exactly: alphabetic
+        Two patterns cover _deny_hit's matching modes: alphabetic
         tokens are word-bounded (a short name is a substring of ordinary English, and one
         denylisted given name once matched inside a CSS colour keyword), while digit-bearing ones
-        are raw substrings, where a boundary would only cause misses.
+        are raw substrings, where a boundary would only cause misses. Qualified repository
+        tokens use these permissive prefilters before a stricter owner/name check.
         """
         key = tuple(t.value for t in self.tokens)
         if self._pf_key == key:
@@ -1007,7 +1012,8 @@ def load_cross_repo_tokens(root, vis_path=None, notes=None):
                          % (age_s / 3600.0))
     self_key, self_name = _repo_slug(root)
     self_owner = self_key.rsplit("/", 1)[0] if "/" in self_key else ""
-    by_name = {}
+    self_names = {self_name, *(self_name + suffix for suffix in CONVENTION_SUFFIXES)} if self_name else set()
+    by_value = {}
     for owner, name in sorted(private):
         # DISTINCTIVE slugs only. A private repo called `notes` would false-positive on the
         # English word, and a gate that cries wolf gets bypassed, at which point it guards
@@ -1021,23 +1027,26 @@ def load_cross_repo_tokens(root, vis_path=None, notes=None):
         # produced no finding at all while an unrelated token in the same line did. The intent was
         # only ever "this repo's OWN companion", and that is a closed set: the repo name, or the
         # repo name plus one of the documented suffixes.
-        if self_owner == owner and self_name and (name == self_name
-                or name in {self_name + suf for suf in CONVENTION_SUFFIXES}):
+        if self_owner == owner and name in self_names:
             continue
+        # The same bare name cannot attribute an own-companion mention to another owner.
+        # Keep the foreign identity qualified, with that owner's original severity.
+        qualified = bool(self_owner and name in self_names)
         # DISTINCTIVENESS. `-config` was hardcoded here while CONVENTION_SUFFIXES lists four, so
         # `<something>-data` with a single hyphen never entered the layer at all: the derivability
         # rule knew about a suffix the admission rule had never heard of.
-        if not (name.endswith(CONVENTION_SUFFIXES)
+        if not qualified and not (name.endswith(CONVENTION_SUFFIXES)
                 or (name.count("-") + name.count("_")) >= 2):
             continue
         parent = derivation_witness(owner, name, public_by_owner) if trust_map else None
         kind = "derived" if parent else "linkage"
+        value = owner + "/" + name if qualified else name
         # A bare name is only derivable if every retained owner's instance is derivable.
         # Otherwise that shared token must retain the stronger linkage jurisdiction.
-        if name not in by_name or kind == "linkage":
-            by_name[name] = Token(name, kind, source="cross-repo",
+        if value not in by_value or kind == "linkage":
+            by_value[value] = Token(value, kind, source="cross-repo-qualified" if qualified else "cross-repo",
                                  witness=("%s/%s is PUBLIC" % (owner, parent)) if parent else None)
-    return [by_name[name] for name in sorted(by_name)]
+    return [by_value[value] for value in sorted(by_value)]
 
 
 def _exempt_path():
@@ -1150,6 +1159,7 @@ def load_policy(root=None, vis_path=None):
 
 
 _DENY_RE_CACHE = {}
+_QUALIFIED_REPO_RE_CACHE = {}
 
 
 def _deny_hit(tok, low_text):
@@ -1167,6 +1177,18 @@ def _deny_hit(tok, low_text):
     rx = _DENY_RE_CACHE.get(tok)
     if rx is None:
         rx = _DENY_RE_CACHE[tok] = re.compile(r"(?<![a-z0-9])%s(?![a-z0-9])" % re.escape(tok))
+    return bool(rx.search(low_text))
+
+
+def _token_hit(token, low_text):
+    """Require exact owner/repository boundaries only for qualified cross-repo tokens."""
+    if token.source != "cross-repo-qualified":
+        return _deny_hit(token.value, low_text)
+    rx = _QUALIFIED_REPO_RE_CACHE.get(token.value)
+    if rx is None:
+        rx = _QUALIFIED_REPO_RE_CACHE[token.value] = re.compile(
+            r"(?<![a-z0-9_.-])%s(?:\.git)?(?=$|[^a-z0-9_.-]|\.(?=$|[^a-z0-9_.-]))"
+            % re.escape(token.value))
     return bool(rx.search(low_text))
 
 
@@ -1267,7 +1289,7 @@ def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, stri
         pf = pol.prefilter()
         if not pf or any(rx.search(low) for rx in pf):
             for tok in pol.tokens:
-                if _deny_hit(tok.value, low):
+                if _token_hit(tok, low):
                     deny_hits.append(tok)
 
     structural = []
@@ -1519,10 +1541,8 @@ def _run_stdin(args, cwd, payload):
     return p.stdout
 
 
-# A blob larger than this is enumerated but not scanned, and the skip is COUNTED and PRINTED. The
-# cap exists because a repo can hold a very large artifact and regexing it would turn a pre-push
-# hook into a hang, which is its own way of getting bypassed. A SILENT cap would be a hole with a
-# performance justification attached, so it is never silent.
+# Bound historical body scanning so a large artifact cannot hang the publication hook.
+# Eligible bodies above this cap make the scan incomplete and block publication with exit 2.
 MAX_BLOB_BYTES = 8 * 1024 * 1024
 
 
@@ -1727,6 +1747,12 @@ def scan_history(root, allow, pol, stats=None):
     if msgs:
         scan_text(msgs, "<commit message>", allow, pol, out, domain="history")
     _scan_object_graph(root, allow, pol, out, ["--all"], stats, "<blob> ")
+    if stats["blobs_oversize"]:
+        oversized = stats["blobs_oversize"]
+        details = "\n".join("%r (%d bytes)" % item for item in oversized[:20])
+        raise ScanIncompleteError(
+            "%d eligible history blob(s) exceed the %d-byte scan limit:\n%s"
+            % (len(oversized), MAX_BLOB_BYTES, details))
     if not (stats["commits"] or stats["blobs_total"] or stats["trees_scanned"] or stats["tags_scanned"]):
         print("pii_guard: NOTE %s has no reachable commits, trees, or blobs -- the history scan examined nothing." % root,
               file=sys.stderr)
@@ -2023,9 +2049,6 @@ def main():
     unexamined = []
     for rel, why in tree_stats.get("unreadable", []):
         unexamined.append(("unreadable", rel, why))
-    for path, size in hist_stats.get("blobs_oversize", []):
-        unexamined.append(("oversize blob", path, "%d bytes, over the %d cap"
-                           % (size, MAX_BLOB_BYTES)))
     if unexamined:
         print("pii_guard: %d item(s) were NOT scanned:" % len(unexamined), file=sys.stderr)
         for kind, what, why in unexamined[:20]:
@@ -2149,6 +2172,12 @@ def cli():
         # reconstruct, so a damaged one is not a degraded scan, it is an absent one.
         print("pii_guard: POLICY UNUSABLE -- the private layer could not be trusted, so this\n"
               "  result is NOT a clean bill of health.\n  %s"
+              % str(e).replace("\n", "\n  "), file=sys.stderr)
+        return 2
+    except ScanIncompleteError as e:
+        print("pii_guard: SCAN INCOMPLETE -- required history content was NOT examined.\n"
+              "  %s\n"
+              "  This result cannot authorize publication. Resolve the oversized content and re-run."
               % str(e).replace("\n", "\n  "), file=sys.stderr)
         return 2
     except GitError as e:

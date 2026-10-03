@@ -28,6 +28,8 @@ from make_fixtures import write_encoded_record, write_count_policy
 from make_fixtures import make_history_fixture, make_tree_ref_fixture
 from make_fixtures import write_encoding_probe, reencode_record
 from make_fixtures import make_identity_shape_fixture
+from make_fixtures import make_sized_history_fixture
+from make_fixtures import owner_collision_cases, owner_collision_policy_cases
 
 
 @pytest.mark.parametrize("role", ["author", "committer"])
@@ -67,7 +69,37 @@ def test_source7_self_exclusion_keeps_other_owner(tmp_path, monkeypatch):
     current, name = write_owner_scope_visibility(vis, g._utcnow())
     monkeypatch.setattr(g, "_repo_slug", lambda root: (current, current.split("/")[-1]))
     tokens = g.load_cross_repo_tokens(".", str(vis))
-    assert [(token.value, token.kind) for token in tokens] == [(name, "linkage")]
+    assert len(tokens) == 1
+    assert tokens[0].value.split("/", 1)[1] == name
+    assert tokens[0].value.split("/", 1)[0] != current.split("/", 1)[0]
+    assert tokens[0].kind == "linkage"
+
+
+@pytest.mark.parametrize("case", owner_collision_cases(), ids=lambda case: case["id"])
+def test_own_name_collision_keeps_foreign_attribution(tmp_path, monkeypatch, case):
+    visibility = write_visibility(tmp_path / "owners.json", case["visibility"], g._utcnow())
+    monkeypatch.setattr(g, "_repo_slug", lambda root: (case["self_key"], case["self_key"].split("/", 1)[1]))
+    tokens = g.load_cross_repo_tokens(".", str(visibility))
+    assert any(token.value == case["foreign"] and token.kind == "linkage" for token in tokens)
+    findings = []
+    g.scan_text(case["text"], "synthetic text", set(), g.Policy.of(tokens), findings, domain="tree")
+    assert any(severity == "BLOCK" for _where, _label, _value, severity in findings) is case["blocked"]
+
+
+@pytest.mark.parametrize("case", owner_collision_policy_cases(), ids=lambda case: case["id"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("domain", ["tree", "staged", "range", "history"])
+def test_owner_collision_preserves_policy_jurisdiction(tmp_path, monkeypatch, case, reverse, domain):
+    entries = dict(reversed(list(case["visibility"].items()))) if reverse else case["visibility"]
+    visibility = write_visibility(tmp_path / "owners.json", entries, case["stamp"] or g._utcnow())
+    monkeypatch.setattr(g, "_repo_slug", lambda root: (case["self_key"], case["self_key"].split("/", 1)[1]))
+    tokens = g.load_cross_repo_tokens(".", str(visibility))
+    if case["secret"]:
+        tokens.append(g.Token(case["text"], "secret"))
+    findings = []
+    g.scan_text(case["text"], "synthetic text", set(), g.Policy.of(tokens), findings, domain=domain)
+    expected = "DEBT" if domain == "history" and case["severity"] == "BLOCK" and not case["secret"] else case["severity"]
+    assert {severity for _where, _label, _value, severity in findings} == {expected}
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -1616,11 +1648,32 @@ def test_a_merge_resolution_is_scanned_in_the_push_range(repo):
 def test_an_oversize_blob_is_recorded_rather_than_silently_skipped(repo, monkeypatch):
     """A silent size cap is a hole with a performance justification attached."""
     monkeypatch.setattr(g, "MAX_BLOB_BYTES", 64)
-    repo.write("big.md", "x" * 4096)
-    repo.commit()
+    make_sized_history_fixture(repo, 4096)
     stats = g._blank_history_stats()
-    g.scan_history(repo.root, set(), g.Policy.of([]), stats=stats)
+    with pytest.raises(g.ScanIncompleteError, match="history blob"):
+        g.scan_history(repo.root, set(), g.Policy.of([]), stats=stats)
     assert stats["blobs_oversize"], "the cap left no trace"
+
+
+@pytest.mark.parametrize("with_tree", [False, True])
+def test_native_oversize_history_refuses_publication(repo, with_tree):
+    make_sized_history_fixture(repo, g.MAX_BLOB_BYTES + 1)
+    arguments = ["--history", "--tree"] if with_tree else ["--history"]
+    status, output = _cli(repo, *arguments)
+    assert status == 2, output
+    assert "SCAN INCOMPLETE" in output
+    assert "pii_guard: clean" not in output
+
+
+def test_native_history_within_limit_still_detects_tokens(repo):
+    from pathlib import Path
+
+    token = make_sized_history_fixture(repo, 4096)
+    policy = write_policy(Path(repo.root).parent / "sized-policy.json", token, g.CANARY_TOKEN)
+    repo.env["PII_DENYLIST"] = str(policy)
+    status, output = _cli(repo, "--history")
+    assert status == 1, output
+    assert "SCAN INCOMPLETE" not in output
 
 
 def _cli(repo, *args):

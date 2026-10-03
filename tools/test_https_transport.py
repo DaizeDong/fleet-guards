@@ -77,7 +77,7 @@ def test_https_policy_does_not_replace_ssh_proof(tmp_path, monkeypatch):
         pytest.fail("Unexpected synthetic SSH proof operation")
 
     monkeypatch.setattr(boundary, "_run", synthetic_git)
-    monkeypatch.setattr(boundary, "_ssh_configuration_problem", lambda: None)
+    monkeypatch.setattr(boundary, "_ssh_configuration_problem", lambda host="github.com": None)
     destinations, errors = boundary._companion_visibility_once(str(tmp_path), str(visibility), {})
     assert errors == []
     assert destinations == ["example-owner/demo-config"]

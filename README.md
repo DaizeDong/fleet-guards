@@ -147,10 +147,11 @@ All Git discovery and object reads use original objects, including commit and ta
 Replacement objects cannot conceal reachable history. Hook repository selectors and the selected
 index remain in effect for scans of the repository being checked.
 
-Format-2 private token policies require an integer `count` matching all loaded entries, including
-the canary. Legacy policies remain readable and report that completeness is unattested. The DATA
-resolver follows the physical installation when imported through a directory alias and refuses
-authorization if filesystem resolution fails. Visibility remains a separate companion audit.
+Format-2 private token policies require an integer `count` matching all loaded entries, including the canary. Legacy policies remain readable and report that completeness is unattested. The DATA resolver follows the physical installation when imported through a directory alias and refuses authorization if filesystem resolution fails. Visibility remains a separate companion audit.
+
+Eligible historical blobs above the 8 MiB scan limit make the history scan incomplete. The API raises `ScanIncompleteError`; the CLI prints `SCAN INCOMPLETE` and exits 2, which blocks publication. A size limit cannot establish that the skipped content is safe. Existing exclusions for known binary extensions remain separate.
+
+When another owner's private repository has exactly this repository's name or a documented companion name, the cross-repository policy retains that foreign `owner/name` as a qualified token. Bare own-companion names and explicit own-owner references do not identify the foreign repository. Explicit foreign references retain their original severity, unrelated private names retain bare-name enforcement, and independent secret denylist entries still apply.
 
 Audit that companion with:
 
@@ -158,12 +159,7 @@ Audit that companion with:
 python guards/tools/data_boundary.py --companion-dir ../example-skill-config --visibility-map /path/to/visibility.json
 ```
 
-The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed`
-timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and
-push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL
-rewrites and additional push URLs are checked. The audit prints the verified repository names and
-allows versioned DATA there. Missing or stale evidence, public destinations, and unrecognized hosts
-or SSH aliases block the audit. This check uses the local receipt and does not make network calls.
+The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed` timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL rewrites and additional push URLs are checked. The audit prints the verified repository names and allows versioned DATA there. SSH aliases require an explicit `HostName github.com` in every plausible configuration chain. Missing or stale evidence, public destinations, unrecognized clients, and unproved routing or trust settings block admission. See [the transport contract](COMPANION.md#verifying-a-companion) for the supported SSH and HTTPS configurations. This check uses the local receipt and does not make network calls.
 
 Companion discovery starts at the physical DATA destination, independently of the invoking hook's
 repository and index. Its stored repository configuration and its effective process configuration

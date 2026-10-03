@@ -12,6 +12,147 @@ from make_fixtures import (
     make_original_object_fixture,
     make_selected_index_fixture,
 )
+from make_fixtures import (
+    make_private_api_fixture,
+    private_api_forbidden_queries,
+    private_api_remote_selection_cases,
+)
+
+
+@pytest.fixture(scope="module")
+def private_api_fixture(tmp_path_factory):
+    return make_private_api_fixture(tmp_path_factory.mktemp("private-api"), guard._utcnow())
+
+
+def test_public_private_proof_preserves_context_without_exposing_environment(private_api_fixture, monkeypatch):
+    fixture = private_api_fixture
+    private = fixture["repos"]["private"]
+    invoker = fixture["repos"]["invoker"]
+    environment = dict(private.env, GIT_DIR=invoker.git("rev-parse", "--absolute-git-dir"),
+                       FG_SYNTHETIC_SECRET=fixture["sentinel"])
+    with git_environment(monkeypatch, environment):
+        first = db.prove_private_companion(private.root / "archive", fixture["receipt"])
+        second = db.prove_private_companion(private.root / "archive", fixture["receipt"])
+        assert first.root == str(private.root.resolve())
+        assert first.repositories == ("example-owner/synthetic-private",)
+        assert first.signature == second.signature
+        assert fixture["sentinel"] not in repr(first)
+        assert "FG_SYNTHETIC_SECRET" not in repr(first)
+        with pytest.raises(AttributeError):
+            first.root = str(invoker.root)
+        assert db.read_private_companion_git(first, "rev-parse", "--verify", "HEAD").stdout.strip() == private.git("rev-parse", "HEAD")
+        for relative, status in ((fixture["ignored"], 0), (fixture["unignored"], 1)):
+            query = db.read_private_companion_git(first, "check-ignore", "--no-index", "-q", "--", relative)
+            assert query.returncode == status
+
+
+@pytest.mark.parametrize("target", ["public", "unknown"])
+def test_public_private_proof_rejects_unproved_destinations(private_api_fixture, monkeypatch, target):
+    repo = private_api_fixture["repos"][target]
+    with git_environment(monkeypatch, repo.env), pytest.raises(db.GitError):
+        db.prove_private_companion(repo.root, private_api_fixture["receipt"])
+
+
+def test_public_private_proof_signature_binds_routing(private_api_fixture, monkeypatch):
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    with git_environment(monkeypatch, repo.env):
+        original = db.prove_private_companion(repo.root, fixture["receipt"])
+        try:
+            repo.git("config", "remote.origin.pushurl", fixture["alternate_route"])
+            updated = db.prove_private_companion(repo.root, fixture["receipt"])
+            assert updated.repositories == original.repositories
+            assert updated.signature != original.signature
+            with pytest.raises(db.GitError, match="changed"):
+                db.read_private_companion_git(original, "rev-parse", "--verify", "HEAD")
+        finally:
+            repo.git("config", "--unset-all", "remote.origin.pushurl")
+
+
+def test_public_private_proof_refuses_changes_during_attestation(private_api_fixture, monkeypatch):
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    original = db._companion_visibility
+    def changed(*arguments):
+        result = original(*arguments)
+        repo.git("config", "remote.origin.pushurl", fixture["alternate_route"])
+        return result
+    monkeypatch.setattr(db, "_companion_visibility", changed)
+    with git_environment(monkeypatch, repo.env):
+        try:
+            with pytest.raises(db.GitError, match="changed"):
+                db.prove_private_companion(repo.root, fixture["receipt"])
+        finally:
+            repo.git("config", "--unset-all", "remote.origin.pushurl")
+
+
+@pytest.mark.parametrize("arguments", private_api_forbidden_queries())
+def test_public_private_queries_reject_unsupported_operations_before_execution(
+        private_api_fixture, monkeypatch, arguments):
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    with git_environment(monkeypatch, repo.env):
+        proof = db.prove_private_companion(repo.root, fixture["receipt"])
+        monkeypatch.setattr(db.subprocess, "run", lambda *args, **kwargs: pytest.fail("unsupported query executed"))
+        with pytest.raises(db.GitError):
+            db.read_private_companion_git(proof, *arguments)
+
+
+@pytest.mark.parametrize("failure", ["status", "launch"])
+def test_public_private_ignore_failures_cannot_mean_unignored(private_api_fixture, monkeypatch, failure):
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    with git_environment(monkeypatch, repo.env):
+        proof = db.prove_private_companion(repo.root, fixture["receipt"])
+        original = db.subprocess.run
+        def failed_query(command, *args, **kwargs):
+            if command[1] == "check-ignore":
+                if failure == "launch":
+                    raise OSError(fixture["sentinel"])
+                return db.subprocess.CompletedProcess(command, 128, "", fixture["sentinel"])
+            return original(command, *args, **kwargs)
+        monkeypatch.setattr(db.subprocess, "run", failed_query)
+        with pytest.raises(db.GitError) as error:
+            db.read_private_companion_git(proof, "check-ignore", "--no-index", "-q", "--", fixture["unignored"])
+        assert fixture["sentinel"] not in str(error.value)
+
+
+def test_public_private_ignore_query_supports_repository_root(private_api_fixture, monkeypatch):
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    with git_environment(monkeypatch, repo.env):
+        proof = db.prove_private_companion(repo.root, fixture["receipt"])
+        result = db.read_private_companion_git(proof, "check-ignore", "--no-index", "-q", "--", ".")
+        assert result.returncode == 1
+
+
+@pytest.mark.parametrize("key,value,allowed", private_api_remote_selection_cases())
+def test_public_private_proof_checks_remote_selectors(private_api_fixture, monkeypatch, key, value, allowed):
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    with git_environment(monkeypatch, repo.env):
+        try:
+            repo.git("config", key, value)
+            if allowed:
+                assert db.prove_private_companion(repo.root, fixture["receipt"]).repositories
+            else:
+                with pytest.raises(db.GitError, match="remote selection"):
+                    db.prove_private_companion(repo.root, fixture["receipt"])
+        finally:
+            repo.git("config", "--unset-all", key)
+
+
+def test_public_private_proof_accepts_named_remote_without_origin(private_api_fixture, monkeypatch):
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    with git_environment(monkeypatch, repo.env):
+        try:
+            repo.git("remote", "rename", "origin", "Archive")
+            repo.git("config", "remote.pushDefault", "Archive")
+            assert db.prove_private_companion(repo.root, fixture["receipt"]).repositories
+        finally:
+            repo.git("config", "--unset-all", "remote.pushDefault")
+            repo.git("remote", "rename", "Archive", "origin")
 
 
 @contextmanager
@@ -505,7 +646,12 @@ def test_source13_batch_protocol_preserves_scan_policy(tmp_path, monkeypatch, ca
 
     fixture, policy, _requests = source13_batch_setup(monkeypatch, variant)
     stats = guard._blank_history_stats()
-    findings = guard.scan_history(str(tmp_path), set(), policy, stats)
+    if variant == "oversize":
+        with pytest.raises(guard.ScanIncompleteError, match="history blob"):
+            guard.scan_history(str(tmp_path), set(), policy, stats)
+        findings = []
+    else:
+        findings = guard.scan_history(str(tmp_path), set(), policy, stats)
     assert stats["blobs_total"] == 2
     assert stats["blobs_scanned"] == (2 if variant == "healthy" else 1)
     assert stats["blobs_binary"] == int(variant == "binary")
@@ -513,11 +659,12 @@ def test_source13_batch_protocol_preserves_scan_policy(tmp_path, monkeypatch, ca
     assert any(value == fixture["token"] and severity == "BLOCK"
                for _where, _label, value, severity in findings) is (variant == "healthy")
     monkeypatch.setattr(sys, "argv", [guard.__file__, "--repo", str(tmp_path), "--history"])
-    assert guard.cli() == {"healthy": 1, "binary": 0, "oversize": 0}[variant]
+    assert guard.cli() == {"healthy": 1, "binary": 0, "oversize": 2}[variant]
     output = capsys.readouterr()
     assert "SCAN FAILED" not in output.err
     if variant == "oversize":
-        assert "NOT examined" in output.out
+        assert "NOT examined" in output.err
+        assert "SCAN INCOMPLETE" in output.err
         assert "pii_guard: clean" not in output.out
 
 
