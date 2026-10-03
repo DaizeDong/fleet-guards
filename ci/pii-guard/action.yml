@@ -113,6 +113,11 @@ runs:
           echo "::error::the guards submodule has no test_ci_coverage.py"; exit 1; }
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_ci_coverage.py" -q
 
+    - name: Publication policy tests (does PRIVATE scope require proof?)
+      shell: bash
+      run: |
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_publication_guard.py" -q
+
     # The DATA BOUNDARY -- the primary control. It is the question that actually matters: is this
     # repo an uninitialized tool, or does it contain somebody's life?
     #
@@ -125,15 +130,6 @@ runs:
     # .dataclass.json stays in the CONSUMER, not here: which paths are TOOL, FIXTURE or DATA is a
     # fact about that repo and cannot be shared. A missing one is fatal, because data_boundary
     # would otherwise exit 0 on every run and leave the primary control inert.
-    - name: Data boundary (is this an uninitialized tool?)
-      shell: bash
-      run: |
-        test -f "$GITHUB_ACTION_PATH/../../tools/data_boundary.py" || {
-          echo "::error::the guards submodule has no data_boundary.py -- the PRIMARY control cannot be optional"; exit 1; }
-        test -f .dataclass.json || {
-          echo "::error::.dataclass.json is MISSING from this repo -- data_boundary would exit 0 on every run"; exit 1; }
-        python "$GITHUB_ACTION_PATH/../../tools/data_boundary.py"
-
     # The companion contract, checked against the resolver by construction.
     #
     # It ran NOWHERE until 2026-09-04. It is a script, not a pytest module, so `pytest tools/`
@@ -149,6 +145,8 @@ runs:
       shell: bash
       run: python "$GITHUB_ACTION_PATH/../../tools/test_companion_contract.py"
 
-    - name: Scan working tree + full history
+    - name: Publication policy (private proof or full public boundary and history scans)
       shell: bash
-      run: python "$GITHUB_ACTION_PATH/../../tools/pii_guard.py" --tree --history
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: python "$GITHUB_ACTION_PATH/../../tools/publication_guard.py" ci

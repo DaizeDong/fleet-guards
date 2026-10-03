@@ -16,6 +16,7 @@ from make_fixtures import (
     make_private_api_fixture,
     private_api_forbidden_queries,
     private_api_remote_selection_cases,
+    private_api_directory_queries,
 )
 
 
@@ -124,6 +125,24 @@ def test_public_private_ignore_query_supports_repository_root(private_api_fixtur
         proof = db.prove_private_companion(repo.root, fixture["receipt"])
         result = db.read_private_companion_git(proof, "check-ignore", "--no-index", "-q", "--", ".")
         assert result.returncode == 1
+
+
+@pytest.mark.parametrize("relative,status", private_api_directory_queries())
+def test_public_private_ignore_query_preserves_absent_directory_semantics(
+        private_api_fixture, monkeypatch, relative, status):
+    import subprocess
+
+    fixture = private_api_fixture
+    repo = fixture["repos"]["private"]
+    assert not (repo.root / relative).exists()
+    arguments = ("check-ignore", "--no-index", "-q", "--", relative)
+    native = subprocess.run(["git", *arguments], cwd=repo.root, env=repo.env,
+                            capture_output=True)
+    assert native.returncode == status
+    with git_environment(monkeypatch, repo.env):
+        proof = db.prove_private_companion(repo.root, fixture["receipt"])
+        assert db.read_private_companion_git(proof, *arguments).returncode == status
+    assert not (repo.root / relative).exists()
 
 
 @pytest.mark.parametrize("key,value,allowed", private_api_remote_selection_cases())
@@ -479,7 +498,7 @@ def test_source12_mandatory_hook_tools_must_be_nonempty(
              if fixture["receipt"].exists() else [])
     if state == "empty":
         assert selected_tool in output and "empty" in output.lower(), output
-        assert calls == ([] if selected_tool == "pii_guard.py" else ["pii_guard.py"])
+        assert calls == []
     else:
         expected = ["pii_guard.py", "data_boundary.py"]
         if state == "fail" and selected_tool == "pii_guard.py":

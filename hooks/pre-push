@@ -1,6 +1,7 @@
 #!/bin/sh
-# PER-REPO pre-push -- the strict local backstop: tree + EVERY commit reachable from any ref
+# PER-REPO pre-push -- the public backstop: tree + EVERY commit reachable from any ref
 # (blobs, messages, author/committer identity, annotated tags, and reference names).
+# Proven PRIVATE destinations instead retain the structural checks and print their scope.
 #
 # Full history is the right scope HERE and only here: this is a repo we own and have already cleaned,
 # so it stays green, and a regression anywhere in it is a real finding. The machine-wide hook cannot
@@ -25,7 +26,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 _HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 _KIT="$(cd "$_HOOK_DIR/.." && pwd)"
 GUARD="$_KIT/tools/pii_guard.py"
-BOUNDARY="$_KIT/tools/data_boundary.py"
+PUBLICATION="$_KIT/tools/publication_guard.py"
 # FAIL CLOSED on a missing guard, same as the interpreter probe below and for the same reason:
 # `|| exit 0` meant deleting one file silently switched push protection off and printed nothing,
 # so a disarmed hook and a passing hook produced identical output. Demonstrated 2026-08-30 by
@@ -60,31 +61,19 @@ fi
 # Printed on every run. This hook is the one that runs --history, so it is the ONLY place the
 # HISTORY-DEBT lines can ever be seen. Swallowing a passing run here would make the entire debt
 # ledger invisible, which is exactly how debt stops being debt and becomes furniture.
-out=$("$PY" "$GUARD" --tree --history 2>&1)
+if [ ! -s "$PUBLICATION" ]; then
+  echo "BLOCKED: $PUBLICATION is missing or empty, so publication scope is unchecked."
+  exit 1
+fi
+out=$("$PY" "$PUBLICATION" pre-push --repo "$ROOT" --push-destination "${2:-}" 2>&1)
 rc=$?
 [ -n "$out" ] && printf '%s\n' "$out"
+# Status 10 means every publication route was proven PRIVATE and structural checks passed.
+[ "$rc" -eq 10 ] && exit 0
 if [ "$rc" -ne 0 ]; then
   echo ""
-  echo "push BLOCKED by pii_guard: real private data would become public and permanent."
+  echo "push BLOCKED by publication policy."
   echo "A file edit is NOT a fix once it is in a commit -- rewrite the history (git filter-repo)."
-  exit 1
-fi
-
-# The DATA BOUNDARY (see the note in pre-commit). Checked again at the push boundary, because this
-# is the last moment anything is still private -- and because a commit can arrive here without ever
-# passing pre-commit (a merge, a cherry-pick, a rebase, another clone, --no-verify).
-if [ ! -f "$BOUNDARY" ] || [ ! -s "$BOUNDARY" ]; then
-  echo "BLOCKED: $BOUNDARY is missing or empty, so the data boundary is not being checked."
-  echo "Restore it with the pii-guard installer rather than pushing blind."
-  exit 1
-fi
-out=$("$PY" "$BOUNDARY" 2>&1)
-rc=$?
-if [ "$rc" -ne 0 ]; then
-  printf '%s\n' "$out"
-  echo ""
-  echo "push BLOCKED by data_boundary: this repo is not an uninitialized tool."
-  echo "Real-run output would become public and permanent. Move it to the private store."
   exit 1
 fi
 

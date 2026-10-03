@@ -12,6 +12,7 @@ import pytest
 import data_boundary as boundary
 from make_fixtures import (write_visibility, write_windows_git_tls_fixture, windows_git_tls_cases,
                            make_native_git_tls_companion, make_native_git_tls_selector_case)
+from make_fixtures import git_ssh_launcher_cases, invalid_windows_git_launchers
 
 
 @pytest.mark.parametrize("case_id", range(15))
@@ -59,6 +60,21 @@ def test_windows_packaged_git_launcher_can_be_hardlinked(tmp_path, monkeypatch):
         return original(path)
     monkeypatch.setattr(Path, "lstat", topology)
     assert boundary._https_configuration_problem(fixture["config"], {}) is None
+
+
+@pytest.mark.parametrize("launcher", git_ssh_launcher_cases())
+def test_windows_bundle_discovery_uses_native_launcher_layout(tmp_path, monkeypatch, launcher):
+    fixture = write_windows_git_tls_fixture(tmp_path, launcher)
+    environment = SimpleNamespace(**vars(os))
+    environment.name = "nt"
+    monkeypatch.setattr(boundary, "os", environment)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: str(fixture["executable"]))
+    assert boundary._https_configuration_problem(fixture["config"], {}) is None
+
+
+def test_windows_package_discovery_rejects_unknown_layouts(tmp_path):
+    for path in invalid_windows_git_launchers(tmp_path):
+        assert boundary._git_windows_installation(path) is None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Git for Windows package defaults")
