@@ -1363,3 +1363,65 @@ def publication_changed_response_urls():
     suffix = "/repos/example-owner/synthetic-tool"
     return ["http://api.github.com" + suffix, "https://api.github.com.example.invalid" + suffix,
             "https://api.github.com" + suffix + "/different"]
+
+
+def make_fleet_visibility_fixture(root, all_routes=False):
+    """Generate a fresh Actions home and all physical/effective publication routes."""
+    root = Path(root)
+    configuration = write_git_context_configuration(root)
+    repo = GitContextFixture(root / "consumer", configuration)
+    home = root / "home"
+    home.mkdir()
+    repo.env = {key: value for key, value in repo.env.items()
+                if key in {"PATH", "LANG", "LC_ALL"} or key.startswith("GIT_")}
+    repo.env.update(HOME=str(home), USERPROFILE=str(home), GITHUB_ACTIONS="true",
+                    PII_DENYLIST=str(home / "absent-policy.json"))
+    names = ["example-owner/synthetic-consumer"]
+    repo.git("remote", "add", "origin", "https://github.com/" + names[0] + ".git")
+    if all_routes:
+        names += ["example-owner/synthetic-rewritten", "example-owner/synthetic-push-a",
+                  "example-owner/synthetic-push-b"]
+        for name in names[2:]:
+            repo.git("config", "--add", "remote.origin.pushurl", "https://github.com/" + name + ".git")
+        repo.env.update(GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="url.https://github.com/" + names[1] + ".insteadOf",
+            GIT_CONFIG_VALUE_0="https://github.com/" + names[0])
+    return {"repo": repo, "home": home, "receipt": home / ".pii-guard/visibility.json",
+            "names": names, "token": synthetic_token("fleet-visibility"),
+            "stale": {names[0]: "PUBLIC", "_refreshed": "2000-01-01T00:00:00Z"}}
+
+
+def fleet_unknown_route():
+    return "https://example.invalid/synthetic-consumer.git"
+
+
+def fleet_visibility_payload(name, state):
+    return {"full_name": name, "private": state == "PRIVATE", "visibility": state.lower()}
+
+
+def make_fleet_receipt_alias(fixture, kind):
+    """Create only synthetic aliases and an in-worktree home for denial controls."""
+    import os
+
+    home, receipt = fixture["home"], fixture["receipt"]
+    receipt.parent.mkdir()
+    receipt.write_text(json.dumps(fixture["stale"]), encoding="utf-8")
+    if kind == "worktree":
+        return fixture["repo"].root
+    if kind == "home":
+        alias = home.parent / "home-alias"
+        alias.symlink_to(home, target_is_directory=True)
+        return alias
+    if kind == "directory":
+        target = home / "receipt-directory"
+        receipt.parent.rename(target)
+        receipt.parent.symlink_to(target, target_is_directory=True)
+    elif kind == "file":
+        target = home / "original-receipt.json"
+        receipt.rename(target)
+        receipt.symlink_to(target)
+    elif kind == "hardlink":
+        os.link(receipt, home / "receipt-hardlink.json")
+    else:
+        raise ValueError("Unknown synthetic receipt topology")
+    return home
