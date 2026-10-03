@@ -127,16 +127,31 @@ A consumer's whole workflow is a checkout, a Python, and one line:
       - uses: ./guards/ci/pii-guard
 ```
 
-Run the same checks by hand from a consumer's root:
+Run the publication policy and contract by hand from a consumer's root:
 
 ```bash
-python guards/tools/pii_guard.py --tree --history
-python guards/tools/data_boundary.py
+python guards/tools/publication_guard.py ci
 python guards/tools/test_companion_contract.py
 ```
 
-The TOOL check rejects declared DATA and sealed paths that physically exist, including ignored
-files and empty declared directories. Keep those paths in a separate private companion repository.
+The normal hooks and composite CI action use `publication_guard.py`. A fresh proof must identify
+every stored and effective fetch/push destination as PRIVATE before private content is permitted.
+An explicit push URL must also belong to the proven configured push routes. Local hooks use the
+installed visibility receipt; GitHub Actions obtains current repository metadata from the canonical
+GitHub API using its job token. Missing evidence retains the full public checks.
+The metadata client rejects custom CA, proxy and TLS key-log environment settings before any
+credential-bearing request. It verifies TLS with default trust, forbids redirects, and requires
+the response URL and repository identity to match the requested canonical API endpoint.
+
+For verified PRIVATE repositories, declared DATA and private references are permitted. Manifest,
+path, schema, fixture, run-shape and sealed-path checks still run, and the pre-commit identity
+assertion remains mandatory. The output names the proven repositories and states that public-content
+scanning is out of scope. Public and unknown repositories receive the full PII and data-boundary
+checks. Explicit `pii_guard.py --tree --history` and `data_boundary.py` invocations remain public-policy
+diagnostics regardless of visibility; private-only content can produce findings in those diagnostics.
+
+The public TOOL check rejects declared DATA and sealed paths that physically exist, including ignored
+files and empty declared directories. Keep public tool DATA in a separate private companion repository.
 
 Staged and range scans compare decoded Git blobs, so UTF-16 editor files receive the same
 addition-only checks as UTF-8. Unchanged and removed lines stay outside those incremental scans;
@@ -172,6 +187,7 @@ into an authorized companion. Linked worktrees remain supported.
 | --- | --- |
 | `tools/pii_guard.py` | The scanner. Allowlist based, structural, runs over the working tree and the full history. |
 | `tools/data_boundary.py` | The primary control. Asks whether this repository is an uninitialized tool or somebody's life. |
+| `tools/publication_guard.py` | Applies proven repository visibility to normal hook and CI policy. |
 | `tools/datadir.py` | The resolver. Decides where real-run output goes, which is always outside the repository. |
 | `tools/fleet_sync.py` | Dispatches verified upstream updates and advances consumer gitlinks. |
 | `tools/test_*.py` | The kit's own suite, including the policy layer whose private half never exists on a runner. |

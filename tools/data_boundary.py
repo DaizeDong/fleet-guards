@@ -622,6 +622,26 @@ def _ssh_profile_home():
         return None
 
 
+def _git_windows_installation(selected):
+    """Recognize launcher layouts, including the executable Git prepends inside hooks."""
+    from pathlib import Path
+
+    if not selected:
+        return None
+    executable = Path(selected)
+    if (not executable.is_absolute() or executable.name.casefold() != "git.exe"
+            or ".." in executable.parts):
+        return None
+    if executable.parent.name.casefold() in {"bin", "cmd"}:
+        installation = executable.parent.parent
+        return installation.parent if installation.name.casefold() in {"mingw32", "mingw64"} else installation
+    if (executable.parent.name.casefold() == "git-core"
+            and executable.parents[1].name.casefold() == "libexec"
+            and executable.parents[2].name.casefold() in {"mingw32", "mingw64"}):
+        return executable.parents[3]
+    return None
+
+
 def _ssh_config_sources():
     """Conservative scan paths and plausible chains for the selected recognized client."""
     import shutil
@@ -645,11 +665,8 @@ def _ssh_config_sources():
         system = str(Path(program_data) / "ssh/ssh_config")
         clients = {canonical(Path(windows) / "System32/OpenSSH/ssh.exe"): system}
         paths.add(system)
-        git = shutil.which("git")
-        if git and Path(git).parent.name.lower() in {"bin", "cmd"}:
-            installation = Path(git).parent.parent
-            if installation.name.casefold() in {"mingw32", "mingw64"}:
-                installation = installation.parent
+        installation = _git_windows_installation(shutil.which("git"))
+        if installation is not None:
             system = str(installation / "etc/ssh/ssh_config")
             bundled = installation / "usr/bin/ssh.exe"
             clients[canonical(bundled)] = system
@@ -886,7 +903,8 @@ def read_private_companion_git(proof, *arguments):
     """Read HEAD or ignore status under a still-current proof's bound Git context.
 
     Only rev-parse --verify HEAD and check-ignore --no-index -q -- RELATIVE_PATH
-    are supported. The latter preserves native status 0/1. Other failures raise
+    are supported. A single trailing / preserves directory-only ignore semantics,
+    including before the directory exists. The latter preserves native status 0/1. Other failures raise
     GitError without exposing captured environment or configuration values.
     """
     if not isinstance(proof, PrivateCompanionProof):
@@ -895,10 +913,11 @@ def read_private_companion_git(proof, *arguments):
         accepted = {0}
     elif len(arguments) == 5 and arguments[:4] == ("check-ignore", "--no-index", "-q", "--"):
         relative = arguments[4]
+        path = relative[:-1] if isinstance(relative, str) and relative.endswith("/") else relative
         if (not isinstance(relative, str) or not relative or "\0" in relative
                 or ntpath.splitdrive(relative)[0] or relative.startswith(("/", "\\"))
                 or (relative != "." and any(part in {"", ".", ".."}
-                                            for part in relative.replace("\\", "/").split("/")))):
+                                            for part in path.replace("\\", "/").split("/")))):
             raise GitError("The ignore query requires a canonical relative path")
         accepted = {0, 1}
     else:
@@ -939,16 +958,12 @@ def _git_bundled_ca(value, env):
     if os.name != "nt" or not isinstance(value, str):
         return False
     selected = shutil.which("git", path=env.get("PATH"))
-    if not selected:
+    installation = _git_windows_installation(selected)
+    if installation is None:
         return False
     executable, requested = Path(selected), Path(value)
-    if (not executable.is_absolute() or not requested.is_absolute()
-            or executable.name.casefold() != "git.exe" or ".." in requested.parts
-            or executable.parent.name.casefold() not in {"bin", "cmd"}):
+    if not requested.is_absolute() or ".." in requested.parts:
         return False
-    installation = executable.parent.parent
-    if installation.name.casefold() in {"mingw32", "mingw64"}:
-        installation = installation.parent
     candidates = [installation / architecture / "etc/ssl/certs/ca-bundle.crt"
                   for architecture in ("mingw32", "mingw64")]
     canonical = lambda path: os.path.normcase(os.path.abspath(path))
@@ -999,6 +1014,10 @@ def _https_configuration_problem(config_entries, env):
                 and value.casefold() in ({"openssl", "schannel"} if os.name == "nt" else {"openssl"})):
             continue
         if option == "sslcainfo" and _git_bundled_ca(value, env):
+            continue
+        if (key in {"http.extraheader", "http.https://github.com/.extraheader"}
+                and isinstance(value, str)
+                and re.fullmatch(r"(?i)authorization: *(?:basic [A-Za-z0-9+/]+=*|bearer [A-Za-z0-9._~+/-]+=*)", value)):
             continue
         return "unproved HTTP configuration override"
     return None
@@ -1315,7 +1334,7 @@ def check_no_undeclared_run_shapes(root, m, files, out):
             out.append(("RUN-SHAPE", rel, why))
 
 
-def main():
+def main(private_proof=None):
     ap = argparse.ArgumentParser(description="Enforce the TOOL / FIXTURE / DATA boundary.")
     ap.add_argument("--repo", default=".")
     ap.add_argument("--explain", nargs="+", metavar="PATH",
@@ -1422,9 +1441,14 @@ def main():
         for kind, path, reason in out:
             print("%s: %s: %s" % (kind, path, reason), file=sys.stderr)
         return 1
-    check_data_not_tracked(root, m, files, out)
+    if private_proof is not None:
+        if os.path.normcase(os.path.realpath(root)) != os.path.normcase(os.path.realpath(private_proof.root)):
+            raise GitError("Private scope does not identify the scanned worktree")
+        read_private_companion_git(private_proof, "check-ignore", "--no-index", "-q", "--", ".")
+    absent = m if private_proof is None else {"data_sealed": m.get("data_sealed", [])}
+    check_data_not_tracked(root, absent, files, out)
     try:
-        check_data_absent_from_worktree(root, m, out)
+        check_data_absent_from_worktree(root, absent, out)
         all_paths = files | set(physical_paths(root))
     except (OSError, GitError) as e:
         print("data_boundary: SCAN FAILED while checking physical DATA paths: %s" % e, file=sys.stderr)
@@ -1475,6 +1499,12 @@ def main():
               file=sys.stderr)
 
     if not out:
+        if private_proof is not None:
+            read_private_companion_git(private_proof, "check-ignore", "--no-index", "-q", "--", ".")
+            print("data_boundary: PRIVATE structural checks passed (%d declared DATA paths permitted, "
+                  "%d FIXTUREs generator-reproducible, %d tracked or physical paths classified)"
+                  % (len(m.get("data", [])), len(m.get("fixture", [])), len(all_paths)))
+            return 0
         print("data_boundary: clean (%d DATA + %d sealed paths not tracked and absent from the worktree, %d FIXTUREs "
               "generator-reproducible, %d tracked or physical paths carry no undeclared real-run shape)"
               % (len(m.get("data", [])), len(m.get("data_sealed", [])),

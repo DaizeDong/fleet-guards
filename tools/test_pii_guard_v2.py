@@ -43,7 +43,7 @@ def test_source8_identity_shape_domain_case(repo, tmp_path, role, domain_case, n
     kit = tmp_path / "identity-kit"
     (kit / "hooks").mkdir(parents=True)
     (kit / "tools").mkdir()
-    for name in ("hooks/pre-commit", "tools/pii_guard.py", "tools/data_boundary.py"):
+    for name in ("hooks/pre-commit", "tools/pii_guard.py", "tools/data_boundary.py", "tools/publication_guard.py"):
         shutil.copyfile(source / name, kit / name)
     (kit / "hooks/pre-commit").chmod(0o755)
     allowed = make_identity_shape_fixture(repo, tmp_path, role, domain_case, numeric)
@@ -190,7 +190,7 @@ def test_source7_tag_cli_and_push_hook(repo, tmp_path, blocked):
     assert cli.returncode == (1 if blocked else 0), cli.stdout + cli.stderr
     source = Path(GUARD).parent.parent
     kit = tmp_path / "hook-kit"
-    for name in ("hooks/pre-push", "tools/pii_guard.py", "tools/data_boundary.py"):
+    for name in ("hooks/pre-push", "tools/pii_guard.py", "tools/data_boundary.py", "tools/publication_guard.py"):
         (kit / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / name, kit / name)
     policy = write_policy(tmp_path / "hook-policy.json", fixture["token"], g.CANARY_TOKEN)
@@ -617,6 +617,7 @@ def test_source3_native_hook_never_falls_back_to_consumer(repo, tmp_path, hook_n
     (kit / "hooks").mkdir(parents=True)
     (kit / "tools").mkdir()
     shutil.copyfile(source / "hooks" / hook_name, kit / "hooks" / hook_name)
+    shutil.copyfile(source / "tools/publication_guard.py", kit / "tools/publication_guard.py")
     for name in ["pii_guard.py", "data_boundary.py"]:
         if missing not in (name, "both"):
             shutil.copyfile(source / "tools" / name, kit / "tools" / name)
@@ -795,7 +796,7 @@ def test_source2_native_hook_blocks_staged_bytes(repo, tmp_path, relative):
     kit = tmp_path / "kit"
     (kit / "hooks").mkdir(parents=True)
     (kit / "tools").mkdir()
-    for name in ("hooks/pre-commit", "tools/pii_guard.py", "tools/data_boundary.py"):
+    for name in ("hooks/pre-commit", "tools/pii_guard.py", "tools/data_boundary.py", "tools/publication_guard.py"):
         shutil.copyfile(source / name, kit / name)
     (kit / "hooks/pre-commit").chmod(0o755)
     repo.git("remote", "remove", "origin")

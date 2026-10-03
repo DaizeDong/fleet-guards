@@ -129,7 +129,20 @@ a fresh visibility receipt alone cannot establish the destination of a modified 
 
 Consumer adapters can import `prove_private_companion(destination, visibility_map=None)` from the installed kit's `tools/data_boundary.py`. It returns an immutable proof with `root`, sorted `repositories`, and an opaque `signature`; the captured process configuration is private and excluded from its representation. The signature binds the canonical repository administration and physical/effective Git configuration snapshots. Configuration changes during proof fail with `GitError`. This wrapper uses the same policy as the companion audit and performs no DATA scan or network operation. Local built-in Git discovery and configuration reads precede the transport verdict.
 
-`read_private_companion_git(proof, *arguments)` supports only `rev-parse --verify HEAD` and `check-ignore --no-index -q -- RELATIVE_PATH`, including exact `.` for the repository root. It returns the native completed process, preserving ignore status 0/1; unsupported queries, noncanonical paths, changed configuration and other failures raise `GitError`. Consumers should serialize only the public fields they need, repeat the proof immediately before writing, and compare its root and signature with the earlier proof. A proof snapshot does not lock the filesystem or authorize a later push.
+`read_private_companion_git(proof, *arguments)` supports only `rev-parse --verify HEAD` and `check-ignore --no-index -q -- RELATIVE_PATH`, including exact `.` for the repository root. A canonical relative directory may end in one `/`, preserving Git's directory-only ignore semantics before that directory exists. Repeated separators, `./`, traversal and absolute paths remain invalid. It returns the native completed process, preserving ignore status 0/1; unsupported queries, noncanonical paths, changed configuration and other failures raise `GitError`. Consumers should serialize only the public fields they need, repeat the proof immediately before writing, and compare its root and signature with the earlier proof. A proof snapshot does not lock the filesystem or authorize a later push.
+
+HTTPS authentication may use a single-line Basic or Bearer Authorization header through `http.extraHeader`
+or the canonical `http.https://github.com/.extraHeader` key. Each occurrence is checked independently.
+Other header names, foreign URL scopes, leading whitespace, tabs, embedded line breaks and NUL bytes
+remain unproved. This supports the credential header written by `actions/checkout` without authorizing
+a different destination or trust configuration. Git's default injected `GIT_EXEC_PATH` is normalized
+only by the normal hook entrypoint after resolving the same Git executable and checking its default;
+the executable, default helper directory and all ancestors must be free of filesystem aliases,
+and the supplied helper path must use the normalized default spelling.
+The companion proof API continues to reject an unproved helper-path environment override.
+Git for Windows discovery recognizes its `cmd`, `bin`, architecture `bin`, and architecture
+`libexec/git-core` launchers. The latter is prepended to PATH by native Git hooks. Each layout
+resolves the same packaged SSH configuration and CA bundle; unknown layouts remain unproved.
 
 Explicit `remote.pushDefault` and `branch.*.remote` or `branch.*.pushRemote` values must name a configured remote, preserving the remote name's case. Local `.` selectors, missing remotes and direct URL/path selectors are unproved and fail admission. No particular remote name, including `origin`, is required.
 

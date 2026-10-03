@@ -51,6 +51,24 @@ def https_transport_cases():
     cases.append({"id": "performance-env", "config": [], "env": {
         "GIT_HTTP_LOW_SPEED_LIMIT": "10", "GIT_HTTP_LOW_SPEED_TIME": "30", "no_proxy": "localhost"},
         "blocked": False})
+    authorization = "AUTHORIZATION: basic c3ludGhldGlj"
+    for label, key, value, blocked in (
+        ("authorization-basic", "http.extraHeader", authorization, False),
+        ("authorization-checkout", "http.https://github.com/.extraHeader", authorization, False),
+        ("authorization-case-space", "HTTP.HTTPS://GITHUB.COM/.EXTRAHEADER", "Authorization:   Basic c3ludGhldGlj", False),
+        ("authorization-bearer", "http.extraHeader", "authorization: bearer synthetic-token", False),
+        ("authorization-host-mismatch", "http.https://example.invalid/.extraHeader", authorization, True),
+        ("authorization-host-suffix", "http.https://github.com.example.invalid/.extraHeader", authorization, True),
+        ("authorization-crlf", "http.extraHeader", authorization + "\r\nHost: example.invalid", True),
+        ("authorization-newline", "http.extraHeader", authorization + "\n", True),
+        ("authorization-leading-space", "http.extraHeader", " " + authorization, True),
+        ("authorization-tab", "http.extraHeader", "Authorization:\tBasic c3ludGhldGlj", True),
+        ("authorization-empty", "http.extraHeader", "Authorization: Basic ", True),
+    ):
+        cases.append({"id": label, "config": [(key, value)], "env": {}, "blocked": blocked})
+    cases.append({"id": "authorization-plus-host", "config": [
+        ("http.extraHeader", authorization), ("http.extraHeader", "Host: example.invalid")],
+        "env": {}, "blocked": True})
     return cases
 
 
@@ -748,6 +766,7 @@ def make_required_hook_tool_fixture(root, source, hook_name, selected_tool, stat
     (kit / "tools").mkdir()
     hook = kit / "hooks" / hook_name
     shutil.copyfile(Path(source) / "hooks" / hook_name, hook)
+    shutil.copyfile(Path(source) / "tools/publication_guard.py", kit / "tools/publication_guard.py")
     for name in ("pii_guard.py", "data_boundary.py"):
         target = kit / "tools" / name
         if name == selected_tool and state == "empty":
@@ -756,10 +775,13 @@ def make_required_hook_tool_fixture(root, source, hook_name, selected_tool, stat
         status = 1 if name == selected_tool and state == "fail" else 0
         text = (
             "import os,sys\n"
-            "with open(os.environ['FG_SYNTHETIC_RECEIPT'], 'a', encoding='utf-8') as stream:\n"
-            "    stream.write(%r)\n"
-            "print(%r)\n"
-            "raise SystemExit(%d)\n"
+            "class GitError(RuntimeError): pass\n"
+            "def prove_private_companion(*args): raise GitError('synthetic UNKNOWN')\n"
+            "if __name__ == '__main__':\n"
+            "    with open(os.environ['FG_SYNTHETIC_RECEIPT'], 'a', encoding='utf-8') as stream:\n"
+            "        stream.write(%r)\n"
+            "    print(%r)\n"
+            "    raise SystemExit(%d)\n"
         ) % (name + "\n", "synthetic tool ran: " + name, status)
         target.write_bytes(text.encode("utf-8"))
     return {"repo": repo, "hook": hook, "receipt": receipt, "kit": kit}
@@ -1006,11 +1028,11 @@ def ssh_alias_route_cases():
     ]
 
 
-def write_windows_git_tls_fixture(root):
+def write_windows_git_tls_fixture(root, launcher="cmd/git.exe"):
     """Generate a package-shaped Git installation; none of its files are executed."""
     root = Path(root)
     installation = root / "synthetic-git"
-    executable = installation / "cmd/git.exe"
+    executable = installation / launcher
     bundle = installation / "mingw64/etc/ssl/certs/ca-bundle.crt"
     custom = root / "custom-ca.pem"
     for path in (executable, bundle, custom):
@@ -1119,7 +1141,16 @@ def ssh_execution_environment_cases():
 
 def git_ssh_launcher_cases():
     """Generate the supported Git for Windows launcher locations."""
-    return ["cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe", "mingw32/bin/git.exe"]
+    return ["cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe", "mingw32/bin/git.exe",
+            "mingw64/libexec/git-core/git.exe", "mingw32/libexec/git-core/git.exe"]
+
+
+def invalid_windows_git_launchers(root):
+    """Unrecognized package layouts cannot select a bundled client or trust bundle."""
+    return [str(Path(root) / name) for name in (
+        "libexec/git-core/git.exe", "mingw16/libexec/git-core/git.exe",
+        "mingw64/libexec/other/git.exe", "mingw64/libexec/git-core/git.cmd",
+        "bin/../git.exe")] + ["cmd/git.exe"]
 
 
 def make_sized_history_fixture(repo, size):
@@ -1206,7 +1237,16 @@ def private_api_forbidden_queries():
             ("check-ignore", "--no-index", "-q", "--", "/outside.json"),
             ("check-ignore", "--no-index", "-q", "--", "C:\\outside.json"),
             ("check-ignore", "--no-index", "-q", "--", "nul\x00name"),
-            ("check-ignore", "--no-index", "-q", "--", "archive/./record.json")]
+            ("check-ignore", "--no-index", "-q", "--", "archive/./record.json"),
+            *(("check-ignore", "--no-index", "-q", "--", path)
+              for path in ("./", "../", "archive//", "archive/../", "archive//nested/",
+                           "archive/./", "/archive/", "C:/archive/", "archive/\0/"))]
+
+
+def private_api_directory_queries():
+    """Generate absent directory probes whose spelling changes native ignore semantics."""
+    return [("ignored-output", 1), ("ignored-output/", 0),
+            ("ignored-output/nested/", 0), ("pending/", 1), ("--synthetic/", 1)]
 
 
 def private_api_remote_selection_cases():
@@ -1216,3 +1256,110 @@ def private_api_remote_selection_cases():
             for value, allowed in (("origin", True), ("Origin", False), (".", False),
                                    ("missing-remote", False), ("", False),
                                    ("https://github.com/example-owner/synthetic-private", False))]
+
+
+def make_publication_fixture(root, source, state="PRIVATE", defect=None, refreshed=None):
+    """Generate an isolated private/public hook repository and synthetic linkage evidence."""
+    import shutil
+    from pii_guard import _utcnow
+
+    root, source = Path(root), Path(source)
+    configuration = write_git_context_configuration(root)
+    repo = GitContextFixture(root / "repository", configuration)
+    home = root / "home"
+    (home / ".pii-guard").mkdir(parents=True)
+    repo.env = {key: value for key, value in repo.env.items() if not key.startswith("GITHUB_")}
+    repo.env.update(HOME=str(home), USERPROFILE=str(home), PII_DENYLIST=str(home / "absent-policy.json"))
+    url = "https://github.com/example-owner/synthetic-tool.git"
+    repo.git("remote", "add", "origin", url)
+    sibling = "example-owner/hidden-sibling-config"
+    (repo.root / "notes.md").write_text("Synthetic sibling: " + sibling + "\n", encoding="utf-8")
+    manifest = {"data": [], "fixture": [], "_audited": "synthetic publication fixture"}
+    if defect in ("data", "sealed"):
+        manifest["data" if defect == "data" else "data_sealed"] = ["private-store/"]
+        write_record(repo.root, "private-store/record.json")
+    if defect == "declaration":
+        manifest["data"] = ["../outside/"]
+    if defect == "fixture":
+        manifest["fixture"] = ["record.json"]
+        write_record(repo.root, "record.json")
+    if defect != "missing-manifest":
+        (repo.root / ".dataclass.json").write_text(json.dumps(manifest), encoding="utf-8")
+    receipt = home / ".pii-guard/visibility.json"
+    write_visibility(receipt, {"example-owner/synthetic-tool": state, sibling: "PRIVATE",
+                              "example-owner/public-target": "PUBLIC"}, refreshed or _utcnow())
+    (home / ".pii-guard/identities.conf").write_text(
+        "example-owner|Fixture|12345678+Fixture@users.noreply.github.com\n", encoding="utf-8")
+    repo.git("add", "--all")
+    repo.git("commit", "-qm", "synthetic publication baseline")
+    kit = root / "kit"
+    for relative in ("tools/pii_guard.py", "tools/data_boundary.py", "tools/publication_guard.py",
+                     "hooks/pre-commit", "hooks/pre-push"):
+        target = kit / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / relative, target)
+        if relative.startswith("hooks/"):
+            target.chmod(0o755)
+    repo.git("config", "core.hooksPath", str(kit / "hooks"))
+    return {"repo": repo, "kit": kit, "receipt": receipt, "url": url, "sibling": sibling,
+            "token": synthetic_token("publication-api"), "unproved_exec": str(root / "unproved-helpers"),
+            "public_url": "https://github.com/example-owner/public-target.git"}
+
+
+def publication_metadata_cases():
+    """Generate authoritative metadata and deliberately inconsistent counterparts."""
+    repository = "example-owner/synthetic-tool"
+    return [(repository, {"full_name": name, "private": private, "visibility": visibility}, expected)
+            for name, private, visibility, expected in (
+                (repository, True, "private", "PRIVATE"),
+                (repository.upper(), True, "private", "PRIVATE"),
+                (repository, False, "public", "PUBLIC"),
+                (repository, True, "public", "UNKNOWN"),
+                (repository, "true", "private", "UNKNOWN"),
+                ("example-owner/different-tool", True, "private", None))]
+
+
+def publication_nul_header():
+    return ("http.extraheader", "Authorization: Basic c3ludGhldGlj\0")
+
+
+def make_hook_helper_path_fixture(root, alias_kind):
+    """Generate executable and helper-path topology without reading an installed binary."""
+    import os
+
+    root = Path(root)
+    installation = root / "synthetic-git"
+    (installation / "bin").mkdir(parents=True)
+    executable = installation / "bin" / ("git.exe" if os.name == "nt" else "git")
+    executable.write_text("synthetic executable identity; not executed\n", encoding="utf-8")
+    default = installation / "libexec/git-core"
+    default.mkdir(parents=True)
+    actual = default
+    if alias_kind == "helper":
+        actual = make_install_alias(root / "helper-alias", default)
+    elif alias_kind == "default-parent":
+        default = make_install_alias(root / "installation-alias", installation) / "libexec/git-core"
+        actual = default
+    elif alias_kind == "executable-parent":
+        executable = make_install_alias(root / "executable-alias", installation) / "bin" / executable.name
+    elif alias_kind != "canonical":
+        raise ValueError("Unknown synthetic helper topology")
+    return {"executable": executable, "default": default, "actual": actual}
+
+
+def publication_metadata_environment_cases():
+    """Ambient trust and proxy controls are unproved before any metadata credential is sent."""
+    return [{key: "synthetic-override"} for key in (
+        "SSL_CERT_FILE", "ssl_cert_dir", "HTTPS_PROXY", "http_proxy", "All_Proxy",
+        "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSLKEYLOGFILE")]
+
+
+def publication_invalid_metadata_targets():
+    return ["../synthetic-tool", "example-owner/..", "example-owner/tool?synthetic",
+            "example-owner/tool#synthetic", "example-owner/tool/extra", "example-owner@host/tool"]
+
+
+def publication_changed_response_urls():
+    suffix = "/repos/example-owner/synthetic-tool"
+    return ["http://api.github.com" + suffix, "https://api.github.com.example.invalid" + suffix,
+            "https://api.github.com" + suffix + "/different"]
