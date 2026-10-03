@@ -1,10 +1,18 @@
 """Synchronization must fail visibly and only move the selected submodule."""
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
+import urllib.request
 
 import pytest
+
+from make_fixtures import (fleet_unknown_route, fleet_visibility_payload, make_fleet_receipt_alias,
+                           make_fleet_visibility_fixture)
 
 
 def module():
@@ -143,3 +151,166 @@ def test_hook_without_filesystem_execute_permission_is_rejected(hook_checkout):
     (hook_checkout / "pre-push").chmod(0o644)
     with pytest.raises(RuntimeError, match="non-executable"):
         module().require_hooks()
+
+
+@pytest.fixture
+def visibility_fixture(tmp_path, monkeypatch):
+    fixture = make_fleet_visibility_fixture(tmp_path, all_routes=True)
+    for key in list(os.environ):
+        monkeypatch.delenv(key)
+    for key, value in fixture["repo"].env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(fixture["repo"].root)
+    return fixture
+
+
+@pytest.fixture
+def visibility_api(visibility_fixture, monkeypatch):
+    fixture = visibility_fixture
+    calls = []
+    response = {"state": "PRIVATE"}
+
+    class Response(io.BytesIO):
+        def geturl(self):
+            return self.url
+
+    def open_metadata(opener, request, *args, **kwargs):
+        name = request.full_url.removeprefix("https://api.github.com/repos/")
+        assert name in fixture["names"]
+        assert request.get_header("Authorization") == "Bearer " + fixture["token"]
+        calls.append(name)
+        if response["state"] == "unavailable":
+            raise OSError("synthetic metadata outage")
+        value = Response(json.dumps(fleet_visibility_payload(name, response["state"])).encode())
+        value.url = request.full_url
+        return value
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", open_metadata)
+    return calls, response
+
+
+def refresh(fixture):
+    return module().refresh_visibility_receipt(
+        Path(__file__).resolve().parent.parent, fixture["repo"].root, fixture["token"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Hosted receipt refresh requires POSIX permissions")
+def test_refresh_covers_every_physical_effective_fetch_and_push_route(visibility_fixture, visibility_api):
+    fixture = visibility_fixture
+    refresh(fixture)
+    receipt = json.loads(fixture["receipt"].read_text())
+    assert set(receipt) == set(fixture["names"]) | {"_refreshed"}
+    assert all(receipt[name] == "PRIVATE" for name in fixture["names"])
+    assert sorted(visibility_api[0]) == sorted(fixture["names"])
+    assert stat.S_IMODE(fixture["receipt"].stat().st_mode) == 0o600
+    assert stat.S_IMODE(fixture["receipt"].parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Hosted receipt refresh requires POSIX permissions")
+@pytest.mark.parametrize("state", ["PRIVATE", "PUBLIC"])
+def test_fresh_metadata_atomically_replaces_stale_receipt(visibility_fixture, visibility_api, state):
+    fixture = visibility_fixture
+    fixture["receipt"].parent.mkdir()
+    fixture["receipt"].write_text(json.dumps(fixture["stale"]))
+    visibility_api[1]["state"] = state
+    refresh(fixture)
+    result = json.loads(fixture["receipt"].read_text())
+    assert result[fixture["names"][0]] == state
+    assert result["_refreshed"] != fixture["stale"]["_refreshed"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Hosted receipt refresh requires POSIX permissions")
+@pytest.mark.parametrize("state", ["UNKNOWN", "unavailable"])
+def test_unavailable_metadata_preserves_previous_receipt(visibility_fixture, visibility_api, state):
+    fixture = visibility_fixture
+    fixture["receipt"].parent.mkdir()
+    before = json.dumps(fixture["stale"])
+    fixture["receipt"].write_text(before)
+    visibility_api[1]["state"] = state
+    with pytest.raises(RuntimeError):
+        refresh(fixture)
+    assert fixture["receipt"].read_text() == before
+
+
+@pytest.mark.parametrize("setting", ["empty-token", "not-actions", "unsupported-platform"])
+def test_refresh_requires_explicit_supported_actions_context(visibility_fixture, visibility_api, monkeypatch, setting):
+    fixture = visibility_fixture
+    if setting == "empty-token":
+        fixture["token"] = ""
+    elif setting == "not-actions":
+        monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    else:
+        # A narrow module-local facade avoids changing pathlib's host platform.
+        import types
+        sync = module()
+        monkeypatch.setattr(sync, "os", types.SimpleNamespace(name="nt", environ=os.environ))
+        with pytest.raises(RuntimeError, match="POSIX"):
+            sync.refresh_visibility_receipt(Path(__file__).parent.parent, fixture["repo"].root, fixture["token"])
+        return
+    with pytest.raises(RuntimeError):
+        refresh(fixture)
+    assert not fixture["receipt"].exists()
+    assert not visibility_api[0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Alias denial runs in the supported Linux runtime")
+@pytest.mark.parametrize("kind", ["worktree", "home", "directory", "file", "hardlink"])
+def test_receipt_alias_or_worktree_location_is_rejected(visibility_fixture, visibility_api, monkeypatch, kind):
+    fixture = visibility_fixture
+    home = make_fleet_receipt_alias(fixture, kind)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    before = fixture["receipt"].read_bytes()
+    with pytest.raises(RuntimeError):
+        refresh(fixture)
+    assert fixture["receipt"].read_bytes() == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Hosted receipt refresh requires POSIX permissions")
+def test_atomic_replace_failure_keeps_old_receipt_and_removes_temporary(visibility_fixture, visibility_api, monkeypatch):
+    fixture = visibility_fixture
+    fixture["receipt"].parent.mkdir()
+    before = json.dumps(fixture["stale"])
+    fixture["receipt"].write_text(before)
+
+    def fail(*args, **kwargs):
+        raise OSError("synthetic replace failure")
+
+    monkeypatch.setattr(os, "replace", fail)
+    with pytest.raises(OSError):
+        refresh(fixture)
+    assert fixture["receipt"].read_text() == before
+    assert list(fixture["receipt"].parent.iterdir()) == [fixture["receipt"]]
+
+
+def test_refresh_cli_rejects_dispatch_before_accessing_credentials(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["fleet_sync.py", "dispatch", "--refresh-visibility"])
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    with pytest.raises(SystemExit) as error:
+        module().main()
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_update_cli_passes_only_explicit_refresh_opt_in(visibility_fixture, monkeypatch, opt_in):
+    sync = module()
+    observed = []
+    monkeypatch.setenv("GH_TOKEN", visibility_fixture["token"])
+    monkeypatch.setattr(sys, "argv", ["fleet_sync.py", "update"] + (["--refresh-visibility"] if opt_in else []))
+    monkeypatch.setattr(sync, "update_consumer", lambda *args, **kwargs: observed.append(kwargs))
+    sync.main()
+    assert observed == [{"refresh_visibility": opt_in}]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Hosted receipt refresh requires POSIX permissions")
+@pytest.mark.parametrize("route", ["absent", "unknown"])
+def test_unproved_route_fails_before_metadata_or_receipt(visibility_fixture, visibility_api, route):
+    fixture = visibility_fixture
+    if route == "absent":
+        fixture["repo"].git("remote", "remove", "origin")
+    else:
+        fixture["repo"].git("config", "--add", "remote.origin.pushurl", fleet_unknown_route())
+    with pytest.raises(RuntimeError):
+        refresh(fixture)
+    assert not fixture["receipt"].exists()
+    assert not visibility_api[0]

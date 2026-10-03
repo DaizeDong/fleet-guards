@@ -2,10 +2,13 @@
 import argparse
 import configparser
 from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import secrets
+import stat
 import subprocess
 import sys
 from urllib.error import HTTPError
@@ -152,7 +155,102 @@ def require_hooks():
             raise RuntimeError("Missing or non-executable .githooks shim; complete fleet-guards installation")
 
 
-def update_consumer(source, expected_sha, token):
+def load_guard_tool(guard, filename):
+    """Load policy from the selected consumer kit, without ambient import fallback."""
+    name = "_fleet_sync_" + Path(filename).stem
+    spec = importlib.util.spec_from_file_location(name, guard / "tools" / filename)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
+
+
+def visibility_receipt_path(root, publication):
+    """Reject worktree destinations and filesystem aliases before writing metadata."""
+    path = Path(os.path.expanduser("~/.pii-guard/visibility.json"))
+    if (not path.is_absolute() or ".." in path.parts
+            or path.resolve().is_relative_to(Path(root).resolve())
+            or not publication.unaliased_absolute(path.parent.parent)):
+        raise RuntimeError("Visibility receipt must be external and unaliased")
+    for node in (path.parent, path):
+        try:
+            info = node.lstat()
+        except FileNotFoundError:
+            continue
+        if (not publication.unaliased_absolute(node)
+                or node == path.parent and not stat.S_ISDIR(info.st_mode)
+                or node == path and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1)):
+            raise RuntimeError("Visibility receipt must be an unaliased regular file")
+    return path
+
+
+def refresh_visibility_receipt(guard, root, token):
+    """Initialize hook metadata only for an explicitly opted-in POSIX Actions job."""
+    if os.name != "posix":
+        raise RuntimeError("Hosted visibility refresh requires POSIX private permissions")
+    if os.environ.get("GITHUB_ACTIONS") != "true" or not isinstance(token, str) or not token.strip():
+        raise RuntimeError("Visibility refresh requires an Actions job and a metadata credential")
+    publication = load_guard_tool(guard, "publication_guard.py")
+    boundary = load_guard_tool(guard, "data_boundary.py")
+    path = visibility_receipt_path(root, publication)
+    context = boundary._companion_git_context(root)
+    repositories = set()
+    for urls in publication.configured_urls(boundary, context):
+        if not urls:
+            raise RuntimeError("Visibility refresh requires configured publication routes")
+        for url in urls:
+            key, _host = boundary._github_publication_route(url)
+            if key is None:
+                raise RuntimeError("Publication destination is UNKNOWN")
+            repositories.add("%s/%s" % key)
+    receipt = {}
+    for repository in sorted(repositories):
+        try:
+            state = publication.github_visibility(repository, token)
+        except (OSError, ValueError, TypeError):
+            raise RuntimeError("Authoritative repository visibility is unavailable") from None
+        if state not in {"PRIVATE", "PUBLIC"}:
+            raise RuntimeError("Authoritative repository visibility is UNKNOWN")
+        receipt[repository] = state
+    receipt["_refreshed"] = load_guard_tool(guard, "pii_guard.py")._utcnow()
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    visibility_receipt_path(root, publication)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = ".visibility-" + secrets.token_hex(16) + ".tmp"
+    created = False
+    try:
+        os.fchmod(directory, 0o700)
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        created = True
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(receipt, output, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        visibility_receipt_path(root, publication)
+        if not os.path.samestat(os.fstat(directory), path.parent.stat()):
+            raise RuntimeError("Visibility receipt directory changed during refresh")
+        os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        created = False
+    finally:
+        try:
+            if created:
+                os.unlink(temporary, dir_fd=directory)
+        finally:
+            os.close(directory)
+    print("Visibility metadata refreshed for %s publication destinations." % len(repositories))
+
+
+def update_consumer(source, expected_sha, token, *, refresh_visibility=False):
     if source not in (*SOURCES, "all"):
         raise ValueError("Unknown upstream repository")
     if git("status", "--porcelain"):
@@ -188,8 +286,15 @@ def update_consumer(source, expected_sha, token):
         if len(guard_modules) != 1:
             raise RuntimeError("A single fleet-guards submodule is required for the commit gate")
         guard = Path(guard_modules[0]["path"])
-        for tool in ("pii_guard.py", "data_boundary.py"):
-            subprocess.run([sys.executable, str(guard / "tools" / tool)], check=True)
+        for tool in ("publication_guard.py", "data_boundary.py", "pii_guard.py"):
+            path = guard / "tools" / tool
+            if not path.is_file() or not path.stat().st_size:
+                raise RuntimeError("Missing or empty publication policy component: " + tool)
+        root = Path(git("rev-parse", "--show-toplevel"))
+        if refresh_visibility:
+            refresh_visibility_receipt(guard, root, token)
+        subprocess.run([sys.executable, str(guard / "tools/publication_guard.py"),
+                        "pre-commit", "--repo", str(root)], check=True)
         # Arm existing fail-closed shims. A missing shim must be repaired during enrollment.
         require_hooks()
         git("config", "core.hooksPath", ".githooks")
@@ -208,7 +313,11 @@ def update_consumer(source, expected_sha, token):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("dispatch", "update"))
+    parser.add_argument("--refresh-visibility", action="store_true",
+                        help="refresh hook metadata for a changed update in a POSIX Actions job")
     args = parser.parse_args()
+    if args.refresh_visibility and args.command != "update":
+        parser.error("--refresh-visibility is only valid for update")
     source = os.environ.get("SOURCE_REPOSITORY", "")
     expected_sha = os.environ.get("SOURCE_SHA", "")
     token = os.environ["GH_TOKEN"]
@@ -218,7 +327,7 @@ def main():
             dispatch_targets(parse_targets(os.environ["FLEET_SYNC_TARGETS"]),
                              json.loads(os.environ["FLEET_SYNC_CREDENTIALS"]), source, sha)
     else:
-        update_consumer(source, expected_sha, token)
+        update_consumer(source, expected_sha, token, refresh_visibility=args.refresh_visibility)
 
 
 if __name__ == "__main__":
