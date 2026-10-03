@@ -117,6 +117,8 @@ SHAPE_EXEMPT = re.compile(r"\.(example|sample|tmpl|template)(\.|$)", re.I)
 # candidates, cards, shards) and that is deliberate, because these ARE the words this fleet's
 # pipelines use. What is NOT promoted is the per-skill inventory that surrounded them: which files
 # that one skill writes, in what size, on which day. That belongs in its probes, not here.
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
 RUN_SHAPES = (
     ("a jsonl ledger under metrics/ -- the exact shape of the 2026-07 leak",
      re.compile(r"(^|/)metrics/.*\.(jsonl|ndjson)$", re.I)),
@@ -160,6 +162,41 @@ RUN_SHAPES = (
                 r"|roster_raw_\d+|roster_shard_\d+|dry)\.(json|jsonl|ndjson)$", re.I)),
     ("a database file -- nobody hand-writes one, so it came from a run",
      re.compile(r"\.(db|sqlite|sqlite3)$", re.I)),
+    # CLAUDE CODE SESSION TRANSCRIPTS (added 2026-09-27). A transcript is the most complete record
+    # of a person this machine produces: every prompt, every file read, every tool result, verbatim.
+    # Until this date none of the shapes above recognised one, so a real session committed into a
+    # public repo passed check 4. Measured with --explain against a schematic listing of the real
+    # session tree: 1 of 6 names matched, and only by the accident of a ledger called transcript.
+    #
+    # These four were calibrated against a real Claude Code session tree, read from OUTSIDE
+    # every repo and reduced to shapes before anything was written here: 1697 top-level
+    # <uuid>.jsonl, ~6000 subagents/**/agent-<id>.jsonl (some .jsonl.gz), 13800 agent-<id>.meta.json,
+    # and <uuid>/tool-results/ and <uuid>/workflows/ sidecars. Scored against every tracked file of
+    # every local consumer before promotion. Deliberately NOT here: a bare `*.jsonl`, which is the
+    # most ordinary test-fixture extension there is. Each arm below needs something no hand-written
+    # file carries: a full RFC 4122 UUID as the whole stem, a `subagents/agent-` path, a UUID
+    # directory holding a session sidecar, or Claude Code's encoded project directory name.
+    # The workflow-journal, tool-result and custom-title arms catch a session's sidecar folder
+    # copied WITHOUT its UUID parent (review 2026-09-27: 593 journals and every tool-result
+    # passed once the parent was stripped). Each still needs a name no hand-written file carries.
+    ("a CLAUDE CODE SESSION TRANSCRIPT -- a UUID-named .jsonl is one whole conversation, verbatim",
+     re.compile(r"(^|/)" + _UUID + r"\.jsonl(\.gz)?$"
+                r"|(^|/)\.fork-" + _UUID + r"\.tmp$", re.I)),
+    ("a CLAUDE CODE SUBAGENT TRANSCRIPT -- subagents/**/agent-<id>.jsonl and its .meta.json",
+     re.compile(r"(^|/)subagents/(.+/)?agent-[A-Za-z0-9_.-]+\.(jsonl(\.gz)?|meta\.json)$"
+                r"|(^|/)subagents/workflows/wf_[A-Za-z0-9_-]+/journal\.jsonl(\.gz)?$", re.I)),
+    ("a CLAUDE CODE SESSION SIDECAR -- tool results and workflow state kept beside a transcript",
+     re.compile(r"(^|/)" + _UUID + r"/(subagents|tool-results|workflows)/"
+                r"|(^|/)" + _UUID + r"/custom-title\.json$"
+                r"|(^|/)tool-results/toolu_[A-Za-z0-9_-]+\.(txt|json)$"
+                r"|(^|/)tool-results/pdf-" + _UUID + r"/page-[0-9]+\.(jpg|jpeg|png)$", re.I)),
+    # The encoded form replaces every path separator (and the drive colon) with '-': a Windows
+    # project becomes `C--Users-name-proj`, a POSIX one `-home-name-proj`. The POSIX arm names the
+    # roots rather than accepting any leading hyphen, because `-foo/` is otherwise just an odd name.
+    ("a CLAUDE CODE PROJECT DIRECTORY -- everything under it is some session's transcript or memory",
+     re.compile(r"(^|/)[A-Za-z]--[A-Za-z0-9._-]+/"
+                r"|(^|/)-(home|Users|root|mnt|workspaces?|tmp|var|opt|srv|private)-[A-Za-z0-9._-]*/"
+                r"|(^|/)\.claude/projects/", re.I)),
 )
 
 
@@ -1427,7 +1464,7 @@ def main():
         # fleet has the same finding written down twice already, in the checks that were demoted to
         # advisory precisely because a permanent amber gets tuned out.
         #
-        # The protection did not move. Check 4 still runs on twelve shapes, a missing manifest is
+        # The protection did not move. Check 4 still runs on every shape, a missing manifest is
         # still NOT ARMED, an empty file list is still a scan failure, and a probe list that exists
         # and does not match is still a VIOLATION. What is now silent is only the absence of a probe
         # list, which is a question about measurement rather than a finding about this repo.

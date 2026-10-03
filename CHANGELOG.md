@@ -23,6 +23,17 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Added
 
+- **Claude Code transcript shapes in `data_boundary.py`.** Check 4 did not recognise a session
+  transcript, so a real conversation committed into a public repository passed. Four shapes now
+  cover it: a `<uuid>.jsonl` or `.jsonl.gz` session file (and the `.fork-<uuid>.tmp` staging copy),
+  a `subagents/**/agent-<id>.jsonl` subagent transcript or its `.meta.json`, a `<uuid>/` directory
+  holding `subagents/`, `tool-results/` or `workflows/`, and anything under an encoded project
+  directory (`C--Users-<x>-<y>/`, `-home-<x>-<y>/`) or `.claude/projects/`. Each needs something no
+  hand-written file carries, so a bare `*.jsonl` fixture does not match. Before promotion the list
+  was scored against every tracked file of every local repository: no consumer gains a finding, and
+  the only new hits across 240 repositories are genuine session-tree files in a private one. Negative controls and over-rejection controls are in `tools/test_data_boundary.py`; a
+  transcript-shaped fixture stays possible through `fixture` plus a generator, as for any other.
+
 - **Runner choice for the shared sync workflow.** `sync-consumer.yml` takes an optional `runs-on`
   input, a JSON string of one label or a label array, read with `fromJSON`. The default is
   `"ubuntu-latest"`, so consumers that pass nothing run exactly as before. It exists for private
