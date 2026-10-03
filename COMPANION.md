@@ -113,31 +113,47 @@ rather than part of this contract. Do not add them to satisfy a checker; nothing
 
 ## Verifying a companion
 
-Visibility evidence must be fresh and PRIVATE for every effective fetch and push URL, including
-Git URL rewrites. Canonical HTTPS URLs are supported. Canonical SSH URLs additionally require a
-recognized system or Git-bundled OpenSSH client and statically verifiable default configurations.
-The SSH policy permits client identity and authentication settings, and explicit `HostName github.com`,
-`User git`, and `Port 22`. Server authentication must use the default known-hosts files, with
-`StrictHostKeyChecking` absent or set to `yes` or `ask`. Disabling verification, automatically
-accepting new keys, or overriding either known-hosts file produces UNKNOWN; the static check
-cannot prove a custom trust file. Custom Git SSH commands or variants, remote helpers, remapped hosts,
-proxies, `Include`, `Match`, and other unsupported active options produce UNKNOWN. Configuration
-commands are never executed during this check. Use canonical HTTPS when an SSH configuration
-cannot be proven by this policy.
+Visibility evidence must be fresh and PRIVATE for every effective fetch and push URL, including Git URL rewrites. Canonical HTTPS URLs are supported. Canonical SSH URLs and SSH aliases require a recognized system or Git-bundled OpenSSH client and statically verifiable default configurations. Each distinct SSH host is checked; an alias additionally needs an explicit `HostName github.com` in every plausible user/system configuration chain. On Windows, a selected Git installation's bundled SSH takes precedence over the SSH executable found on Python's PATH.
 
-The HTTPS policy checks both physical and effective Git configuration before granting PRIVATE
-admission. Default routing and certificate trust are supported, as is an explicitly enabled
-`http.sslVerify`. HTTP version, connection counts, buffering, low-speed limits, and keepalive
-tuning remain supported. Other HTTP options, including URL-scoped settings, remote proxies,
-custom TLS trust, resolver entries, redirects, and headers require transport proof that this
-static check does not provide, so they produce UNKNOWN. Every configuration occurrence is
-checked, including an override followed by an empty value.
+The SSH policy permits client identity and authentication settings, and explicit `HostName github.com`, `User git`, and `Port 22`. Server authentication must use the default known-hosts files, with `StrictHostKeyChecking` absent or set to `yes` or `ask`. Disabling verification, automatically accepting new keys, or overriding either known-hosts file produces UNKNOWN; the static check cannot prove a custom trust file. Custom Git SSH commands or variants, `GIT_EXEC_PATH` overrides, remote helpers, remapped hosts, proxies, `Include`, `Match`, embedded NUL bytes, and other unsupported active syntax produce UNKNOWN. Configuration commands and `ssh -G` are never executed during this check. Use canonical HTTPS when an SSH configuration cannot be proven by this policy.
+
+The HTTPS policy checks both physical and effective Git configuration before granting PRIVATE admission. Default routing and certificate trust are supported, as is an explicitly enabled `http.sslVerify`. OpenSSL and Windows Schannel backend selections are supported. Git for Windows may explicitly name its own packaged CA bundle through an absolute path belonging to the selected installation; the certificate path must pass regular-file and filesystem-alias checks. This recognizes packaged trust without reading certificate contents. Custom CA files, unknown backends, disabled verification or Schannel revocation checks, and Schannel custom-CA enablement produce UNKNOWN.
+
+HTTP version, connection counts, buffering, low-speed limits, and keepalive tuning remain supported. Other HTTP options, including URL-scoped settings, remote proxies, resolver entries, redirects, and headers require transport proof that this static check does not provide, so they produce UNKNOWN. Every configuration occurrence is checked, including an unsafe override followed by a default or empty value.
 
 Proxy, certificate, TLS-backend, Git-helper, and HTTP request environment overrides likewise
 produce UNKNOWN for HTTPS. `no_proxy` alone and the Git low-speed environment settings do not
 alter this admission. The check never executes an override and never prints its value. Restore
 the standard HTTPS transport settings or use the separately verified SSH policy before retrying;
 a fresh visibility receipt alone cannot establish the destination of a modified connection.
+
+Consumer adapters can import `prove_private_companion(destination, visibility_map=None)` from the installed kit's `tools/data_boundary.py`. It returns an immutable proof with `root`, sorted `repositories`, and an opaque `signature`; the captured process configuration is private and excluded from its representation. The signature binds the canonical repository administration and physical/effective Git configuration snapshots. Configuration changes during proof fail with `GitError`. This wrapper uses the same policy as the companion audit and performs no DATA scan or network operation. Local built-in Git discovery and configuration reads precede the transport verdict.
+
+`read_private_companion_git(proof, *arguments)` supports only `rev-parse --verify HEAD` and `check-ignore --no-index -q -- RELATIVE_PATH`, including exact `.` for the repository root. It returns the native completed process, preserving ignore status 0/1; unsupported queries, noncanonical paths, changed configuration and other failures raise `GitError`. Consumers should serialize only the public fields they need, repeat the proof immediately before writing, and compare its root and signature with the earlier proof. A proof snapshot does not lock the filesystem or authorize a later push.
+
+Explicit `remote.pushDefault` and `branch.*.remote` or `branch.*.pushRemote` values must name a configured remote, preserving the remote name's case. Local `.` selectors, missing remotes and direct URL/path selectors are unproved and fail admission. No particular remote name, including `origin`, is required.
+
+After loading the kit module as `boundary`, an adapter can use the following sequence. `existing_parent` is an existing directory containing the intended destination, `relative_path` is that destination's canonical path relative to the proven repository root, and `visibility_map` is a local receipt path or `None` for the default receipt.
+
+```python
+proof = boundary.prove_private_companion(existing_parent, visibility_map)
+head = boundary.read_private_companion_git(
+    proof, "rev-parse", "--verify", "HEAD"
+).stdout.strip()
+ignored = boundary.read_private_companion_git(
+    proof, "check-ignore", "--no-index", "-q", "--", relative_path
+)
+if ignored.returncode == 0:
+    raise boundary.GitError("The DATA destination is ignored")
+
+current = boundary.prove_private_companion(existing_parent, visibility_map)
+if (current.root, current.repositories, current.signature) != (
+    proof.root, proof.repositories, proof.signature
+):
+    raise boundary.GitError("Companion publication state changed before writing")
+```
+
+A failed proof or metadata read must stop the write. The adapter still owns destination containment, filesystem-alias checks, concurrent-writer handling and atomic writes. Keep the final proof adjacent to the write, and avoid serializing the proof's private context.
 
 ```
 python tools/data_boundary.py                 # this repo holds no run output

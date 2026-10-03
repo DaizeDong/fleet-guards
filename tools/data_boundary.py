@@ -82,6 +82,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, field
 
 MANIFEST = ".dataclass.json"
 
@@ -536,6 +537,39 @@ def _github_repo_key(url):
     return None if name in (".", "..") else (owner, name)
 
 
+def _github_publication_route(url):
+    """Parse a publication identity while retaining the SSH host that needs proof."""
+    from urllib.parse import urlsplit
+    if not isinstance(url, str) or any(character.isspace() or ord(character) < 32 for character in url):
+        return None, None
+    if url.startswith("https://"):
+        return _github_repo_key(url), None
+    if "?" in url or "#" in url:
+        return None, None
+    if url.startswith("git@"):
+        match = re.fullmatch(r"git@([A-Za-z0-9][A-Za-z0-9_.-]*):([^:]+)", url)
+        if not match:
+            return None, None
+        host, path = match.groups()
+    elif url.startswith("ssh://"):
+        try:
+            parsed = urlsplit(url)
+            host = parsed.hostname
+            if (parsed.username != "git" or parsed.password is not None or parsed.port is not None
+                    or not host or parsed.netloc.casefold() != ("git@" + host).casefold()
+                    or not parsed.path.startswith("/")):
+                return None, None
+        except ValueError:
+            return None, None
+        path = parsed.path[1:]
+    else:
+        return None, None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", host):
+        return None, None
+    key = _github_repo_key("git@github.com:" + path)
+    return (key, host.casefold()) if key is not None else (None, None)
+
+
 def _ssh_profile_home():
     """OpenSSH can use the account profile independently of HOME or USERPROFILE."""
     try:
@@ -551,59 +585,93 @@ def _ssh_profile_home():
         return None
 
 
-def _ssh_config_paths():
-    """Default configurations of recognized system or Git-bundled OpenSSH clients."""
+def _ssh_config_sources():
+    """Conservative scan paths and plausible chains for the selected recognized client."""
     import shutil
     from pathlib import Path
     client = shutil.which("ssh")
-    if not client:
-        return None
     canonical = lambda path: os.path.normcase(os.path.realpath(path))
     profile = _ssh_profile_home()
     if not profile:
         return None
     homes = {profile, os.path.expanduser("~"), os.environ.get("HOME"), os.environ.get("USERPROFILE")}
-    paths = {str(Path(home) / ".ssh/config") for home in homes if home and home != "~"}
-    if not paths:
+    candidates = [str(Path(home) / ".ssh/config") for home in homes if home and home != "~"]
+    user_paths = {os.path.normcase(os.path.abspath(path)): path for path in sorted(candidates)}
+    if not user_paths:
         return None
+    user_paths = set(user_paths.values())
+    paths = set(user_paths)
     if os.name == "nt":
         windows, program_data = os.environ.get("SystemRoot"), os.environ.get("ProgramData")
         if not windows or not program_data:
             return None
-        clients = {canonical(Path(windows) / "System32/OpenSSH/ssh.exe")}
-        paths.add(str(Path(program_data) / "ssh/ssh_config"))
+        system = str(Path(program_data) / "ssh/ssh_config")
+        clients = {canonical(Path(windows) / "System32/OpenSSH/ssh.exe"): system}
+        paths.add(system)
         git = shutil.which("git")
         if git and Path(git).parent.name.lower() in {"bin", "cmd"}:
             installation = Path(git).parent.parent
-            clients.add(canonical(installation / "usr/bin/ssh.exe"))
-            paths.add(str(installation / "etc/ssh/ssh_config"))
+            if installation.name.casefold() in {"mingw32", "mingw64"}:
+                installation = installation.parent
+            system = str(installation / "etc/ssh/ssh_config")
+            bundled = installation / "usr/bin/ssh.exe"
+            clients[canonical(bundled)] = system
+            paths.add(system)
+            # Git for Windows prepends its bundled tools when launching SSH.
+            if bundled.is_file():
+                client = str(bundled)
     else:
-        clients = {canonical("/usr/bin/ssh"), canonical("/bin/ssh")}
+        clients = {canonical(name): "/etc/ssh/ssh_config" for name in ("/usr/bin/ssh", "/bin/ssh")}
         paths.add("/etc/ssh/ssh_config")
-    return sorted(paths) if canonical(client) in clients else None
+    if not client:
+        return None
+    selected_system = clients.get(canonical(client))
+    if selected_system is None:
+        return None
+    return {"paths": sorted(paths), "chains": [(name, selected_system) for name in sorted(user_paths)]}
 
 
-def _ssh_configuration_problem():
-    """Prove the canonical host under a deliberately small static OpenSSH policy.
+def _ssh_config_paths():
+    sources = _ssh_config_sources()
+    return sources["paths"] if sources is not None else None
+
+
+def _ssh_configuration_problem(host="github.com"):
+    """Prove a literal SSH host under a deliberately small static OpenSSH policy.
 
     Never invoke ssh -G: evaluating Match exec there can execute configuration commands.
     Unknown clients, redirects, Includes, Match, proxies and unsupported active options fail closed.
     Server authentication must retain default trust files and default, yes, or ask verification.
+    Callers supply the explicit git user from a parsed URL. Aliases additionally require
+    explicit HostName github.com in every plausible chain; conflicting User options fail.
     """
     import fnmatch
     import shlex
     import stat
     from pathlib import Path
-    paths = _ssh_config_paths()
+    if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", host):
+        return "SSH hostname is outside the static policy"
+    host = host.casefold()
+    if host == "github.com":
+        paths, chains = _ssh_config_paths(), None
+    else:
+        sources = _ssh_config_sources()
+        paths = sources["paths"] if sources is not None else None
+        chains = sources["chains"] if sources is not None else None
     if paths is None:
         return "SSH client or default configuration locations are unproven"
+    if host != "github.com" and (not chains or any(
+            len(chain) != 2 or any(name not in paths for name in chain) for chain in chains)):
+        return "SSH alias configuration chains are unproven"
     harmless = {"identityfile", "identitiesonly", "batchmode", "preferredauthentications",
                 "passwordauthentication", "pubkeyauthentication", "kbdinteractiveauthentication",
                 "loglevel",
                 "connecttimeout", "serveraliveinterval", "serveralivecountmax", "tcpkeepalive",
                 "addkeystoagent", "identityagent", "hashknownhosts", "sendenv", "gssapiauthentication"}
     fixed = {"hostname": "github.com", "user": "git", "port": "22"}
+    explicit = {}
     for name in paths:
+        explicit[name] = set()
         path = Path(name)
         try:
             for node in [*reversed(path.parents), path]:
@@ -620,8 +688,10 @@ def _ssh_configuration_problem():
                 continue
             if len(data) > 65536:
                 return "SSH configuration exceeds the static attestation limit"
+            if b"\x00" in data:
+                return "SSH configuration contains an unsupported NUL byte"
             active = True
-            for line in data.decode("utf-8-sig").splitlines():
+            for line in data.decode("utf-8-sig").split("\n"):
                 if not line.strip() or line.lstrip().startswith("#"):
                     continue
                 # The subset avoids parser-dependent inline comments and continuation rules.
@@ -634,14 +704,16 @@ def _ssh_configuration_problem():
                 if key in {"include", "match"}:
                     return "SSH Include or Match cannot establish a static destination"
                 if key == "host":
-                    if any("[" in value or "\\" in value for value in values):
+                    if "\\" in line or any("[" in value for value in values):
                         return "SSH Host pattern is outside the static policy"
-                    matches = lambda value: fnmatch.fnmatchcase("github.com", value.lower())
+                    matches = lambda value: fnmatch.fnmatchcase(host, value)
                     active = (any(matches(value) for value in values if not value.startswith("!"))
                               and not any(matches(value[1:]) for value in values if value.startswith("!")))
                 elif active and key in fixed:
-                    if len(values) != 1 or values[0].lower() != fixed[key] or "\\" in line:
+                    if (len(values) != 1 or "\\" in line
+                            or (values[0] if key == "user" else values[0].lower()) != fixed[key]):
                         return "SSH configuration changes the canonical destination"
+                    explicit[name].add(key)
                 elif active and key == "stricthostkeychecking":
                     if len(values) != 1 or values[0].lower() not in {"yes", "ask"}:
                         return "SSH configuration does not preserve server authentication"
@@ -651,6 +723,10 @@ def _ssh_configuration_problem():
                     return "SSH configuration contains an unproven active option"
         except (OSError, UnicodeError, ValueError):
             return "SSH configuration could not be statically verified"
+    if chains is not None and any(
+            "hostname" not in set().union(*(explicit[name] for name in chain))
+            for chain in chains):
+        return "SSH alias lacks an explicit GitHub hostname in every configuration chain"
     return None
 
 
@@ -720,6 +796,90 @@ def _companion_visibility(root, visibility_map, git_context=None):
     return sorted(proven), []
 
 
+@dataclass(frozen=True)
+class PrivateCompanionProof:
+    """A read-only proof snapshot; private process configuration is excluded from repr."""
+
+    root: str
+    repositories: tuple
+    signature: str
+    _context: tuple = field(repr=False, compare=False)
+
+
+def _private_configurations(context):
+    root, physical, effective = context
+    return tuple(_run(["git", "config", "--null", "--list"], root, env=environment)
+                 for environment in (physical, effective))
+
+
+def _private_signature(context, configurations):
+    import hashlib
+
+    root, physical, effective = context
+    locations = [{key: value for key, value in environment.items()
+                  if key.casefold() in {"path", "home", "userprofile", "systemroot", "programdata"}}
+                 for environment in (physical, effective)]
+    payload = [root, physical["GIT_DIR"], locations, configurations]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def prove_private_companion(destination, visibility_map=None):
+    """Prove current PRIVATE publication routes without scanning or modifying DATA.
+
+    Local built-in Git discovery/configuration reads precede transport attestation.
+    This delegates to the same physical/effective policy as the companion audit;
+    it never invokes SSH, a remote helper, or a network operation. Callers must
+    repeat the proof before writing: a snapshot is not a filesystem lock.
+    """
+    from types import MappingProxyType
+
+    context = _companion_git_context(destination)
+    before = _private_configurations(context)
+    repositories, errors = _companion_visibility(context[0], visibility_map, context)
+    if errors:
+        raise GitError("PRIVATE companion proof failed: " + "; ".join(errors))
+    if before != _private_configurations(context):
+        raise GitError("Companion configuration changed during PRIVATE proof")
+    frozen_context = (context[0], MappingProxyType(dict(context[1])), MappingProxyType(dict(context[2])))
+    return PrivateCompanionProof(context[0], tuple(sorted(repositories)),
+                                 _private_signature(context, before), frozen_context)
+
+
+def read_private_companion_git(proof, *arguments):
+    """Read HEAD or ignore status under a still-current proof's bound Git context.
+
+    Only rev-parse --verify HEAD and check-ignore --no-index -q -- RELATIVE_PATH
+    are supported. The latter preserves native status 0/1. Other failures raise
+    GitError without exposing captured environment or configuration values.
+    """
+    if not isinstance(proof, PrivateCompanionProof):
+        raise GitError("A current PRIVATE companion proof is required")
+    if arguments == ("rev-parse", "--verify", "HEAD"):
+        accepted = {0}
+    elif len(arguments) == 5 and arguments[:4] == ("check-ignore", "--no-index", "-q", "--"):
+        relative = arguments[4]
+        if (not isinstance(relative, str) or not relative or "\0" in relative
+                or ntpath.splitdrive(relative)[0] or relative.startswith(("/", "\\"))
+                or (relative != "." and any(part in {"", ".", ".."}
+                                            for part in relative.replace("\\", "/").split("/")))):
+            raise GitError("The ignore query requires a canonical relative path")
+        accepted = {0, 1}
+    else:
+        raise GitError("Unsupported read-only companion Git query")
+    if _private_signature(proof._context, _private_configurations(proof._context)) != proof.signature:
+        raise GitError("Companion configuration changed after PRIVATE proof")
+    try:
+        result = subprocess.run(["git", *arguments], cwd=proof.root, env=proof._context[2],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except (OSError, ValueError) as error:
+        raise GitError("Read-only companion Git query could not run") from error
+    if result.returncode not in accepted:
+        raise GitError("Read-only companion Git query failed with status %d" % result.returncode)
+    if _private_signature(proof._context, _private_configurations(proof._context)) != proof.signature:
+        raise GitError("Companion configuration changed during read-only query")
+    return result
+
+
 _HTTPS_PERFORMANCE_KEYS = {
     "version", "maxrequests", "minsessions", "postbuffer", "lowspeedlimit",
     "lowspeedtime", "keepaliveidle", "keepaliveinterval", "keepalivecount",
@@ -727,11 +887,56 @@ _HTTPS_PERFORMANCE_KEYS = {
 _HTTPS_PERFORMANCE_ENV = {"git_http_low_speed_limit", "git_http_low_speed_time"}
 
 
+def _git_bundled_ca(value, env):
+    """Recognize the selected Git for Windows installation's default CA bundle.
+
+    Explicitly naming that bundle preserves the client's packaged trust. A custom
+    file, missing file or filesystem alias cannot receive this default-trust credit.
+    This checks package layout and topology, without reading certificate contents.
+    Git for Windows may hard-link its launcher; executable integrity remains a
+    prerequisite of invoking Git. The certificate bundle must have one link.
+    """
+    import shutil
+    import stat
+    from pathlib import Path
+    if os.name != "nt" or not isinstance(value, str):
+        return False
+    selected = shutil.which("git", path=env.get("PATH"))
+    if not selected:
+        return False
+    executable, requested = Path(selected), Path(value)
+    if (not executable.is_absolute() or not requested.is_absolute()
+            or executable.name.casefold() != "git.exe" or ".." in requested.parts
+            or executable.parent.name.casefold() not in {"bin", "cmd"}):
+        return False
+    installation = executable.parent.parent
+    if installation.name.casefold() in {"mingw32", "mingw64"}:
+        installation = installation.parent
+    candidates = [installation / architecture / "etc/ssl/certs/ca-bundle.crt"
+                  for architecture in ("mingw32", "mingw64")]
+    canonical = lambda path: os.path.normcase(os.path.abspath(path))
+    if canonical(requested) not in {canonical(path) for path in candidates}:
+        return False
+    try:
+        for path in (executable, requested):
+            for node in [*reversed(path.parents), path]:
+                info = node.lstat()
+                if (stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400
+                        or path == requested and stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
+                    return False
+            if not stat.S_ISREG(info.st_mode):
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _https_configuration_problem(config_entries, env):
     """Prove default HTTPS routing and trust under a small static configuration policy.
 
     A PRIVATE receipt identifies the repository, but cannot authorize a different
-    connection selected by a proxy, resolver, trust override, or transport helper.
+    connection selected by a proxy, resolver, custom trust file, or transport helper.
+    Standard TLS backends and Git for Windows' own bundle preserve default trust.
     Diagnostics name only the category; configuration values can contain secrets.
     """
     for name in env:
@@ -753,6 +958,11 @@ def _https_configuration_problem(config_entries, env):
             continue
         if option == "sslverify" and value is not None and value.strip().casefold() in {"true", "yes", "on", "1"}:
             continue
+        if (option == "sslbackend" and isinstance(value, str)
+                and value.casefold() in ({"openssl", "schannel"} if os.name == "nt" else {"openssl"})):
+            continue
+        if option == "sslcainfo" and _git_bundled_ca(value, env):
+            continue
         return "unproved HTTP configuration override"
     return None
 
@@ -761,8 +971,8 @@ def _companion_visibility_once(root, visibility_map, env):
     """Require fresh PRIVATE evidence for every effective fetch and push destination.
 
     Reuse pii_guard's visibility receipt format and maximum age. Git expands insteadOf and
-    pushInsteadOf through get-url; checking every remote also covers branch pushRemote choices.
-    Unknown hosts, SSH aliases, absent receipts and stale receipts cannot authorize DATA.
+    pushInsteadOf through get-url. Explicit remote selectors must name an attested remote.
+    SSH aliases require a static proof of their literal host before receipts authorize DATA.
     """
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pii_guard.py")
     try:
@@ -787,12 +997,19 @@ def _companion_visibility_once(root, visibility_map, env):
             key, separator, value = entry.partition("\n")
             config_entries.append((key, value if separator else None))
             config[key.lower()] = value
+    for key, value in config_entries:
+        normalized = key.casefold()
+        if (normalized == "remote.pushdefault"
+                or normalized.startswith("branch.") and normalized.rsplit(".", 1)[-1] in {"remote", "pushremote"}):
+            if value == "." or value not in remotes:
+                return [], ["companion remote selection is not a configured remote; visibility is UNKNOWN"]
     if any(key.startswith("remote.") and key.rsplit(".", 1)[-1] in {"vcs", "uploadpack", "receivepack"}
            for key in config):
         return [], ["companion has a custom remote transport command; visibility is UNKNOWN"]
-    ssh_override = (any(name in env for name in ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"))
+    ssh_override = (any(name.upper() in {"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_EXEC_PATH"}
+                        for name in env)
                     or any(name in config for name in ("core.sshcommand", "ssh.variant")))
-    ssh_check = []
+    ssh_checks = {}
     https_check = []
     proven, errors = set(), []
     for remote in remotes:
@@ -801,18 +1018,19 @@ def _companion_visibility_once(root, visibility_map, env):
             if not urls:
                 errors.append("companion remote %s %s has no destination; visibility is UNKNOWN" % (remote, role))
             for url in urls:
-                key = _github_repo_key(url)
+                key, ssh_host = _github_publication_route(url)
                 if key is not None and url.startswith("https://"):
                     if not https_check:
                         https_check.append(_https_configuration_problem(config_entries, env))
                     if https_check[0]:
                         errors.append("companion HTTPS destination is UNKNOWN: " + https_check[0])
                         continue
-                if key is not None and (url.startswith("git@") or url.startswith("ssh://")):
-                    if not ssh_check:
-                        ssh_check.append("custom SSH transport override" if ssh_override else _ssh_configuration_problem())
-                    if ssh_check[0]:
-                        errors.append("companion SSH destination is UNKNOWN: " + ssh_check[0])
+                if key is not None and ssh_host is not None:
+                    if ssh_host not in ssh_checks:
+                        ssh_checks[ssh_host] = ("custom SSH transport override" if ssh_override
+                                                else _ssh_configuration_problem(ssh_host))
+                    if ssh_checks[ssh_host] is not None:
+                        errors.append("companion SSH destination is UNKNOWN: " + str(ssh_checks[ssh_host]))
                         continue
                 if key is None:
                     errors.append("companion remote %s %s destination is UNKNOWN" % (remote, role))

@@ -156,7 +156,7 @@ def write_mailbox_filename(root, suffix=".png", blocked=True, placeholder=False)
     mailbox = ("synthetic.person." + hashlib.sha256(b"filename-control").hexdigest()[:12]
                + "@" + "gmail.com") if blocked else "user1@example.com"
     if placeholder:
-        mailbox = "user1@gmail.com"
+        mailbox = "user1" + "@" + "gmail.com"
     relative = "contacts/" + mailbox + suffix
     path = Path(root)/relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -391,7 +391,7 @@ def write_ssh_config(root, variant, relative=".ssh/config"):
     return path
 
 
-def make_ssh_layout(root):
+def make_ssh_layout(root, *, bundled_client=False):
     """Generate distinct account, environment, client and system locations for SSH tests."""
     root = Path(root)
     layout = {name: root / name for name in (
@@ -401,6 +401,10 @@ def make_ssh_layout(root):
         write_ssh_config(layout[name], "absent")
     write_ssh_config(layout["program-data"], "absent", "ssh/ssh_config")
     write_ssh_config(layout["git-installation"], "absent", "etc/ssh/ssh_config")
+    if bundled_client:
+        executable = layout["git-installation"] / "usr/bin/ssh.exe"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("synthetic client metadata; never execute\n", encoding="utf-8")
     return layout
 
 
@@ -896,3 +900,319 @@ def make_reference_batch_fixture(variant):
         ("git", "rev-list", "--objects", "--no-object-names", "--all"): "",
     }
     return {"refs": refs, "targets": targets, "responses": responses}
+
+
+def ssh_alias_cases():
+    """Generate only synthetic static host and plausible-chain attestations."""
+    safe = "Host synthetic-alias\n HostName github.com\n User git\n"
+    return [
+        {"id": name, "host": host, "configs": configs, "chains": chains, "allowed": allowed}
+        for name, host, configs, chains, allowed in [
+            ("canonical-absent", "github.com", [None, None], [[0, 1]], True),
+            ("alias-explicit", "synthetic-alias", [safe, None], [[0, 1]], True),
+            ("alias-system", "synthetic-alias", [None, safe], [[0, 1]], True),
+            ("alias-pattern-uppercase", "synthetic-alias",
+             [safe.replace("Host synthetic-alias", "Host SYNTHETIC-ALIAS"), None], [[0, 1]], False),
+            ("alias-pattern-escape", "synthetic-alias",
+             [safe.replace("Host synthetic-alias", "Host synthetic\\-alias"), None], [[0, 1]], False),
+            ("alias-uppercase-negation", "synthetic-alias",
+             [safe.replace("Host synthetic-alias", "Host * !SYNTHETIC-ALIAS"), None], [[0, 1]], True),
+            ("alias-single-quoted-pattern", "synthetic-alias",
+             [safe.replace("Host synthetic-alias", "Host 'synthetic-alias'"), None], [[0, 1]], True),
+            ("alias-double-quoted-pattern", "synthetic-alias",
+             [safe.replace("Host synthetic-alias", 'Host "synthetic-alias"'), None], [[0, 1]], True),
+            ("alias-uppercase-user", "synthetic-alias",
+             [safe.replace("User git", "User GIT"), None], [[0, 1]], False),
+            ("alias-crlf", "synthetic-alias", [safe.replace("\n", "\r\n"), None], [[0, 1]], True),
+            *[
+                ("alias-nonlf-" + suffix, "synthetic-alias",
+                 ["Host synthetic-alias" + separator + " HostName github.com\n", None], [[0, 1]], False)
+                for suffix, separator in [
+                    ("vertical-tab", "\v"), ("form-feed", "\f"), ("unicode-line", "\u2028"),
+                    ("unicode-next-line", "\u0085"), ("carriage-return", "\r"),
+                ]
+            ],
+            ("alias-split-chain", "synthetic-alias",
+             ["Host synthetic-alias\n HostName github.com\n", "Host synthetic-alias\n User git\n"], [[0, 1]], True),
+            ("alias-wildcard", "synthetic-alias", [safe.replace("synthetic-alias", "synthetic-*"), None], [[0, 1]], True),
+            ("alias-missing-hostname", "synthetic-alias", ["Host synthetic-alias\n User git\n", None], [[0, 1]], False),
+            ("alias-url-supplies-user", "synthetic-alias", ["Host synthetic-alias\n HostName github.com\n", None], [[0, 1]], True),
+            ("alias-absent", "synthetic-alias", [None, None], [[0, 1]], False),
+            ("alias-other-host", "synthetic-alias", [safe.replace("github.com", "example.com"), None], [[0, 1]], False),
+            ("alias-other-user", "synthetic-alias", [safe.replace("User git", "User other"), None], [[0, 1]], False),
+            ("alias-port", "synthetic-alias", [safe + " Port 443\n", None], [[0, 1]], False),
+            ("alias-proxy", "synthetic-alias", [safe + " ProxyCommand synthetic-never-execute\n", None], [[0, 1]], False),
+            ("alias-include", "synthetic-alias", [safe + "Include synthetic-no-read\n", None], [[0, 1]], False),
+            ("alias-match", "synthetic-alias", [safe + 'Match exec "synthetic-never-execute"\n', None], [[0, 1]], False),
+            ("alias-untrusted", "synthetic-alias", [safe + " StrictHostKeyChecking no\n", None], [[0, 1]], False),
+            ("alias-trust-file", "synthetic-alias", [safe + " UserKnownHostsFile synthetic-no-read\n", None], [[0, 1]], False),
+            ("alias-negated", "synthetic-alias", [safe.replace("Host synthetic-alias", "Host * !synthetic-alias"), None], [[0, 1]], False),
+            ("alias-override-later", "synthetic-alias", [safe + "Host *\n HostName example.com\n", None], [[0, 1]], False),
+            ("alias-only-unused-config", "synthetic-alias", [None, None, safe], [[0, 1]], False),
+            ("alias-only-canonical-host-block", "synthetic-alias", [safe.replace("Host synthetic-alias", "Host github.com"), None], [[0, 1]], False),
+            ("alias-one-plausible-home-missing", "synthetic-alias", [safe, None, None], [[0, 2], [1, 2]], False),
+            ("alias-all-plausible-homes", "synthetic-alias", [safe, safe, None], [[0, 2], [1, 2]], True),
+            ("alias-system-covers-missing-home", "synthetic-alias", [safe, None, safe], [[0, 2], [1, 2]], True),
+            ("alias-selected-system-hostile", "synthetic-alias", [safe, safe.replace("github.com", "example.com")], [[0, 1]], False),
+            ("alias-nonselected-system-hostile", "synthetic-alias", [safe, None, safe.replace("github.com", "example.com")], [[0, 1]], False),
+            ("alias-no-chain-proof", "synthetic-alias", [safe, None], None, False),
+            ("alias-unrelated-hostile", "synthetic-alias",
+             [safe + "Host unrelated-host\n HostName example.com\n", None], [[0, 1]], True),
+            ("alias-canonical-together", "synthetic-alias",
+             [safe + "Host github.com\n HostName github.com\n User git\n", None], [[0, 1]], True),
+        ]
+    ]
+
+
+def write_ssh_alias_case(root, case):
+    from pathlib import Path
+    root = Path(root)
+    paths = [root / ("synthetic-config-" + str(index)) for index in range(len(case["configs"]))]
+    root.mkdir(parents=True, exist_ok=True)
+    for path, content in zip(paths, case["configs"]):
+        if content is not None:
+            path.write_text(content, encoding="utf-8")
+    chains = None if case["chains"] is None else [[str(paths[index]) for index in chain] for chain in case["chains"]]
+    return [str(path) for path in paths], chains
+
+
+def ssh_alias_route_cases():
+    """Every expected host remains distinct even when repository identities coincide."""
+    repository = "example-owner/demo-config"
+    canonical = "git@github.com:" + repository + ".git"
+    first = "git@synthetic-first:" + repository + ".git"
+    second = "ssh://git@synthetic-second/" + repository + ".git"
+    return [
+        {"id": name, "fetch": fetch, "push": push, "blocked_hosts": blocked,
+         "visibility": visibility, "hosts": hosts, "allowed": allowed}
+        for name, fetch, push, blocked, visibility, hosts, allowed in [
+            ("alias-private", [first], [first], [], "PRIVATE", ["synthetic-first"], True),
+            ("aliases-private", [first], [second], [], "PRIVATE", ["synthetic-first", "synthetic-second"], True),
+            ("canonical-alias-private", [canonical], [first], [], "PRIVATE", ["github.com", "synthetic-first"], True),
+            ("alias-canonical-private", [first], [canonical], [], "PRIVATE", ["synthetic-first", "github.com"], True),
+            ("second-host-hostile", [first], [second], ["synthetic-second"], "PRIVATE", ["synthetic-first", "synthetic-second"], False),
+            ("hostile-before-safe", [second], [first], ["synthetic-second"], "PRIVATE", ["synthetic-second", "synthetic-first"], False),
+            ("multiple-fetch-urls", [first, second], [canonical], [], "PRIVATE",
+             ["synthetic-first", "synthetic-second", "github.com"], True),
+            ("canonical-then-hostile-alias", [canonical], [first], ["synthetic-first"], "PRIVATE", ["github.com", "synthetic-first"], False),
+            ("alias-public", [first], [second], [], "PUBLIC", ["synthetic-first", "synthetic-second"], False),
+            ("alias-unknown", [first], [second], [], "UNKNOWN", ["synthetic-first", "synthetic-second"], False),
+            ("explicit-port", [first], [second.replace("synthetic-second/", "synthetic-second:22/")], [],
+             "PRIVATE", ["synthetic-first"], False),
+            ("password", [first], [second.replace("git@", "git:synthetic@")], [], "PRIVATE", ["synthetic-first"], False),
+            ("query", [first], [second + "?synthetic"], [], "PRIVATE", ["synthetic-first"], False),
+            ("unknown-transport", [first], ["file:///synthetic/no-repository"], [], "PRIVATE", ["synthetic-first"], False),
+        ]
+    ]
+
+
+def write_windows_git_tls_fixture(root):
+    """Generate a package-shaped Git installation; none of its files are executed."""
+    root = Path(root)
+    installation = root / "synthetic-git"
+    executable = installation / "cmd/git.exe"
+    bundle = installation / "mingw64/etc/ssl/certs/ca-bundle.crt"
+    custom = root / "custom-ca.pem"
+    for path in (executable, bundle, custom):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic metadata fixture; never execute or use as TLS trust\n", encoding="utf-8")
+    config = [("http.sslbackend", "openssl"), ("http.sslcainfo", str(bundle))]
+    return {"executable": executable, "bundle": bundle, "custom": custom, "config": config}
+
+
+def windows_git_tls_cases(fixture):
+    """Pair ordinary package defaults with hostile or unproved transport settings."""
+    defaults = fixture["config"]
+    return [
+        {"id": name, "config": config, "env": env, "allowed": allowed}
+        for name, config, env, allowed in [
+            ("openssl-package-defaults", defaults, {}, True),
+            ("openssl-default-trust", [("http.sslbackend", "openssl")], {}, True),
+            ("schannel-default-trust", [("http.sslbackend", "schannel")], {}, True),
+            ("package-bundle-url-scope", [("http.sslbackend", "openssl"),
+                ("http.https://github.com/.sslcainfo", str(fixture["bundle"]))], {}, True),
+            ("unknown-backend", [("http.sslbackend", "synthetic-backend")], {}, False),
+            ("custom-trust", [("http.sslbackend", "openssl"),
+                ("http.sslcainfo", str(fixture["custom"]))], {}, False),
+            ("relative-trust", [("http.sslcainfo", "ca-bundle.crt")], {}, False),
+            ("disabled-verification", defaults + [("http.sslverify", "false")], {}, False),
+            ("proxy", defaults + [("http.proxy", "http://proxy.example.invalid:8080")], {}, False),
+            ("resolver", defaults + [("http.curloptresolve", "github.com:443:192.0.2.10")], {}, False),
+            ("revocation-disabled", [("http.sslbackend", "schannel"),
+                ("http.schannelcheckrevoke", "false")], {}, False),
+            ("schannel-custom-trust", [("http.sslbackend", "schannel"),
+                ("http.schannelusesslcainfo", "true")], {}, False),
+            ("environment-trust", defaults, {"GIT_SSL_CAINFO": str(fixture["custom"])}, False),
+            ("environment-backend", defaults, {"CURL_SSL_BACKEND": "synthetic-backend"}, False),
+            ("custom-then-default", [("http.sslcainfo", str(fixture["custom"]))] + defaults, {}, False),
+        ]
+    ]
+
+
+def make_native_git_tls_companion(root):
+    """Retain installed Git configuration without inheriting a hook's repository."""
+    import os
+    import subprocess
+    root = Path(root)
+    root.mkdir()
+    selectors = {
+        "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG",
+    }
+    environment = {key: value for key, value in os.environ.items() if key.upper() not in selectors}
+    commands = [["init", "-q"], ["remote", "add", "origin", "https://github.com/example-owner/demo-config.git"]]
+    for args in commands:
+        subprocess.run(["git", "-C", str(root), *args], env=environment,
+                       capture_output=True, text=True, check=True)
+    return {"root": root, "visibility": {"example-owner/demo-config": "PRIVATE"},
+            "env": environment,
+            "disabled_verification": ["config", "http.sslVerify", "false"]}
+
+
+def ssh_parser_boundary_cases():
+    """Generate control-byte configurations that native C parsers can truncate."""
+    return [
+        {"id": "canonical-host-nul", "host": "github.com",
+         "content": "Host github.com\x00ignored\n HostName elsewhere.example\n"},
+        {"id": "alias-proxy-after-nul", "host": "synthetic-alias",
+         "content": "Host synthetic-alias\n HostName github.com\nHost synthetic-alias\x00ignored\n ProxyCommand synthetic-never-execute\n"},
+        {"id": "alias-comment-nul", "host": "synthetic-alias",
+         "content": "Host synthetic-alias\n HostName github.com\n# synthetic\x00comment\n"},
+    ]
+
+
+def write_git_ssh_selection_case(root, location, launcher="cmd/git.exe"):
+    """Place a generated alias in either possible client's system configuration."""
+    layout = make_ssh_layout(root, bundled_client=True)
+    layout["git-executable"] = layout["git-installation"] / launcher
+    layout["git-executable"].parent.mkdir(parents=True, exist_ok=True)
+    layout["git-executable"].write_text("synthetic launcher metadata; never execute\n", encoding="utf-8")
+    safe = next(case for case in ssh_alias_cases() if case["id"] == "alias-explicit")["configs"][0]
+    paths = {"system": layout["program-data"] / "ssh/ssh_config",
+             "bundled": layout["git-installation"] / "etc/ssh/ssh_config"}
+    for name, path in paths.items():
+        if location in {name, "both"}:
+            path.write_text(safe, encoding="utf-8")
+    return layout
+
+
+def make_native_git_tls_selector_case(root):
+    """Generate a disposable hook caller whose Git selectors must not leak into setup."""
+    root = Path(root)
+    root.mkdir()
+    configuration = write_git_context_configuration(root)
+    decoy = GitContextFixture(root / "decoy", configuration)
+    admin = decoy.git("rev-parse", "--absolute-git-dir")
+    return {"decoy": decoy, "destination": root / "companion",
+            "selectors": {"GIT_DIR": admin, "GIT_WORK_TREE": str(decoy.root),
+                          "GIT_COMMON_DIR": admin, "GIT_INDEX_FILE": str(Path(admin) / "index")}}
+
+
+def ssh_execution_environment_cases():
+    """Generate Git tool-search overrides that can select an unproved SSH client."""
+    return [{"env": {key: "synthetic-tools"} if key else {}, "allowed": not key,
+             "url": "git@github.com:example-owner/demo-config.git"}
+            for key in (None, "GIT_EXEC_PATH", "git_exec_path", "GiT_ExEc_PaTh")]
+
+
+def git_ssh_launcher_cases():
+    """Generate the supported Git for Windows launcher locations."""
+    return ["cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe", "mingw32/bin/git.exe"]
+
+
+def make_sized_history_fixture(repo, size):
+    """Generate a reachable text record with a token at a specified byte size."""
+    token = synthetic_token("sized-history")
+    assert size >= len(token) + 2
+    repo.write("sized-history.md", "s" * (size - len(token) - 2) + "\n" + token + "\n")
+    repo.commit("synthetic sized history")
+    return token
+
+
+def owner_collision_cases():
+    """Generate attributable foreign references and ambiguous own-name collisions."""
+    cases = []
+    own_owner, public_name = "example-owner-a", "public-research-tool"
+    for suffix in ("", "-config", "-data", "-private", "-secrets"):
+        name = public_name + suffix
+        for foreign_owner in ("example-owner-b", "example-owner-b2"):
+            own, foreign = own_owner + "/" + name, foreign_owner + "/" + name
+            references = [
+                ("own-bare", name, False), ("own-qualified", own, False),
+                ("own-https", "https://github.com/" + own + ".git", False),
+                ("own-scp", "git@github.com:" + own + ".git", False),
+                ("foreign-qualified", foreign, True),
+                ("foreign-https", "https://github.com/" + foreign + ".git", True),
+                ("foreign-scp", "git@github.com:" + foreign + ".git", True),
+                ("foreign-ssh", "ssh://git@github.com/" + foreign + ".git", True),
+                ("foreign-upper", foreign.upper(), True),
+                ("foreign-sentence", foreign + ".", True),
+                ("longer-owner", "prefix-" + foreign, False),
+                ("longer-repo", foreign + "-archive", False),
+                ("dotted-repo", foreign + ".archive", False),
+                ("longer-git-repo", foreign + ".git-archive", False),
+            ]
+            for index, (label, text, blocked) in enumerate(references):
+                visibility = {own_owner + "/" + public_name: "PUBLIC", foreign: "PRIVATE",
+                              "example-owner-c/unrelated-hidden-config": "PRIVATE"}
+                if index % 2:
+                    visibility[own] = "PRIVATE"
+                if index % 3 == 0:
+                    visibility = {key.upper(): value for key, value in reversed(list(visibility.items()))}
+                cases.append({"id": suffix.lstrip("-") + "-" + foreign_owner + "-" + label,
+                              "self_key": own_owner + "/" + public_name, "foreign": foreign,
+                              "visibility": visibility, "text": text, "blocked": blocked})
+    return cases
+
+
+def owner_collision_policy_cases():
+    """Keep each foreign owner's own witness, freshness and unrelated-name severity."""
+    current = "example-owner-a/public-research-tool"
+    companion = "public-research-tool-config"
+    foreign = "example-owner-b/" + companion
+    base = {current: "PUBLIC", "example-owner-a/" + companion: "PRIVATE", foreign: "PRIVATE",
+            "example-owner-c/unrelated-hidden-config": "PRIVATE"}
+    return [
+        {"id": label, "self_key": current, "foreign": foreign, "text": text, "visibility": visibility,
+         "stamp": stamp, "severity": severity, "secret": secret}
+        for label, text, visibility, stamp, severity, secret in [
+            ("foreign-linkage", foreign, base, None, "BLOCK", False),
+            ("foreign-own-public-parent", foreign, dict(base, **{"example-owner-b/public-research-tool": "PUBLIC"}), None, "WARN", False),
+            ("foreign-stale-parent", foreign, dict(base, **{"example-owner-b/public-research-tool": "PUBLIC"}), "2000-01-01T00:00:00Z", "BLOCK", False),
+            ("unrelated-bare", "unrelated-hidden-config", base, None, "BLOCK", False),
+            ("independent-secret", companion, base, None, "BLOCK", True),
+        ]
+    ]
+
+
+def make_private_api_fixture(root, refreshed):
+    """Generate a versioned companion and query targets for the supported proof API."""
+    fixture = make_companion_context_fixture(root, refreshed)
+    private = fixture["repos"]["private"]
+    (private.root / ".gitignore").write_text("ignored-output/\n", encoding="utf-8")
+    fixture.update(ignored="ignored-output/record.json", unignored="archive/next.json",
+                   alternate_route="https://github.com/example-owner/synthetic-private",
+                   sentinel=synthetic_token("private-api-environment"))
+    return fixture
+
+
+def private_api_forbidden_queries():
+    """Only the documented local metadata reads belong to the public helper."""
+    return [("status",), ("push",), ("config", "http.sslVerify", "false"),
+            ("check-ignore", "--no-index", "-q", "--", "../outside.json"),
+            ("check-ignore", "--no-index", "-q", "--", "..\\outside.json"),
+            ("check-ignore", "--no-index", "-q", "--", "/outside.json"),
+            ("check-ignore", "--no-index", "-q", "--", "C:\\outside.json"),
+            ("check-ignore", "--no-index", "-q", "--", "nul\x00name"),
+            ("check-ignore", "--no-index", "-q", "--", "archive/./record.json")]
+
+
+def private_api_remote_selection_cases():
+    """Generate configured, local, absent, and case-distinct remote selectors."""
+    return [(key, value, allowed)
+            for key in ("remote.pushDefault", "branch.main.pushRemote", "branch.main.remote")
+            for value, allowed in (("origin", True), ("Origin", False), (".", False),
+                                   ("missing-remote", False), ("", False),
+                                   ("https://github.com/example-owner/synthetic-private", False))]
