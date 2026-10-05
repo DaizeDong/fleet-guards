@@ -1425,3 +1425,61 @@ def make_fleet_receipt_alias(fixture, kind):
     else:
         raise ValueError("Unknown synthetic receipt topology")
     return home
+
+
+def package_api_cases():
+    """Generate synthetic package inputs; no operator data or ambient files are read."""
+    shapes = [
+        ("AKIA" + "A" * 16, "aws_access_key"),
+        ("ASIA" + "A" * 16, "aws_access_key"),
+        ("AGPA" + "A" * 16, "aws_access_key"),
+        ("AIDA" + "A" * 16, "aws_access_key"),
+        ("glpat-" + "A" * 24, "gitlab_token"),
+        ("npm_" + "A" * 36, "npm_token"),
+        ("sk-ant-" + "a" * 24, "anthropic_key"),
+        ("sk-proj-" + "a" * 24, "openai_key"),
+        ("sk-" + "a" * 12, "openai_key"),
+        ("ghp_" + "A" * 12, "github_token"),
+        ("ghs_" + "a._-" * 9, "github_token"),
+        ("github_pat_" + "A" * 12, "github_pat_fine"),
+        ("xoxb-" + "A" * 10, "slack_token"),
+        ("AIza" + "A" * 30, "google_api_key"),
+        ("sk_" + "test_" + "a" * 16, "stripe_key"),
+        ("rk_" + "live_" + "a" * 16, "stripe_key"),
+        ("mfa." + "A" * 20, "discord_bot_token"),
+        ("A" * 24 + "." + "A" * 6 + "." + "A" * 27, "discord_bot_token"),
+        ("eyJ" + "A" * 8 + "." + "A" * 8 + "." + "A" * 8, "jwt"),
+        ("Bearer " + "short", "bearer_token"),
+        ("https://discord.com/api/webhooks/123/" + "A" * 24, "discord_webhook"),
+        ("https://ptb.discordapp.com/api/webhooks/123/" + "A" * 24, "discord_webhook"),
+        ("https://hooks.slack.com/services/" + "A/B/C", "slack_webhook"),
+        ("https://open.feishu.cn/open-apis/bot/v2/hook/" + "a" * 24, "feishu_webhook"),
+        ("https://user1:synthetic-password@example.com/", "credential_uri"),
+        ("postgresql://user1:p@example.com/db", "db_connection_string"),
+        ("mongodb+srv://user1:p@example.com/db", "db_connection_string"),
+        ("https://example.com/?token=short", "query_credential"),
+        ("run --api-key short", "cli_credential"),
+        ("run --password='synthetic password'", "cli_credential"),
+        ('{"password": "synthetic-password"}', "credential_assignment"),
+        ("refresh_token = synthetic-value", "credential_assignment"),
+        ("private_key = synthetic-value", "credential_assignment"),
+        ("access-key: synthetic-value", "credential_assignment"),
+    ]
+    return {
+        "shapes": shapes,
+        "safe": "synthetic public sentence",
+        "large_prefix": "synthetic public sentence. " * 42000,
+        "benign": ["synthetic public sentence", 'password = "${PASSWORD}"',
+                   'token = "redacted"', "sk-your-synthetic-api-key"],
+        "partial_templates": ['password = "${PASSWORD}suffix"',
+                              'password = "redacted-but-a-value"'],
+        "strict": ["SYNTHETIC_CANARY", "sk-your-synthetic-api-key",
+                   "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"],
+        "invalid_budgets": [{"max_text_chars": value} for value in (0, -1, True, 2.5, 16 * 1024 * 1024 + 1)]
+            + [{"seconds": value} for value in (0, -1, True, 31, float("nan"), float("inf"))],
+        "cli": [(b"synthetic public sentence", 0, "clean"),
+                (b"Bearer synthetic", 1, "findings"), (bytes([255]), 2, "scan_failed")],
+        "payloads": [b"synthetic first content", b"synthetic replacement content"],
+        "concurrent_payloads": [bytes([65 + n]) * 10000 for n in range(4)],
+        "unsafe_paths": ["../escape", "stream:private", "NUL", "CON.txt", "trailing.", "trailing "],
+    }

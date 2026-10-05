@@ -1,0 +1,19 @@
+name: python-package
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install pytest setuptools wheel
+      - run: python -m pytest tests/test_package_api.py tests/test_package_wheel.py -q
