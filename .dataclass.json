@@ -20,11 +20,12 @@
     "  pii_guard.py grant -> ~/.pii-guard/denylist-exempt.json, OUTSIDE every work tree, and",
     "                        deliberately so: an exemption granted from inside a repo would let a",
     "                        leaking agent write its own permission slip in the same commit.",
-    "Nothing else writes. The tracked set is code, tests, two hooks, one action, docs and dotfiles:",
+    "The original standalone kit otherwise writes no runtime store. Its tracked set is code and documentation:",
     "no ledger, no runs tree, no dated output, no database.",
     "",
     "_run_shape_probes stays empty for the same reason and is the one honest answer here: a probe",
     "list names what a real run of THIS repo writes, and a real run of this repo writes nothing.",
-    "2026-10-03. tools/fleet_sync.py writes selected consumer gitlinks and ephemeral runner Git configuration. Explicit POSIX Actions refresh additionally writes repository visibility metadata to the job's external ~/.pii-guard/visibility.json receipt. The initializer validates receipt placement and permissions; private publication still requires canonical metadata and route proof. Subscriber inventory and credentials are read from Actions secrets, never written into the public kit. Real enrollment and verification records belong in a private administration repository."
+    "2026-10-03. tools/fleet_sync.py writes selected consumer gitlinks and ephemeral runner Git configuration. Explicit POSIX Actions refresh additionally writes repository visibility metadata to the job's external ~/.pii-guard/visibility.json receipt. The initializer validates receipt placement and permissions; private publication still requires canonical metadata and route proof. Subscriber inventory and credentials are read from Actions secrets, never written into the public kit. Real enrollment and verification records belong in a private administration repository.",
+    "2026-10-05. The shared Python filesystem API writes only to explicit caller-supplied paths; it owns no runtime store or default output path. Credential scans return metadata to the caller or stdout. Package builds contain TOOL code only; tests create disposable synthetic files from tools/make_fixtures.py. No real-run DATA destination is introduced in this repository. Consumers retain responsibility for proving PRIVATE storage and publication authority."
   ]
 }

@@ -2,6 +2,9 @@
 
 The guard kit for this fleet, in one place, consumed as a git submodule: nine detection rules, a data boundary, and hooks that refuse to run when they are not there.
 
+Python consumers can build the [shared filesystem and credential-scanning package](PACKAGE.md).
+Its versioned API and wheel are separate from the Git hook entrypoints.
+
 [![Guard Kit](https://img.shields.io/badge/Guard%20Kit-Git%20Submodule-orange?style=flat)](#install)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Detection Rules](https://img.shields.io/badge/Detection%20Rules-9-green?style=flat)](#what-is-in-here)
