@@ -7,11 +7,13 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from make_fixtures import _no_window  # noqa: E402
 
 
 def run(*arguments, **kwargs):
     result = subprocess.run([sys.executable, *arguments], capture_output=True,
-                            text=True, timeout=120, **kwargs)
+                            text=True, timeout=120, **_no_window(**kwargs))
     assert result.returncode == 0, result.stdout + result.stderr
     return result
 

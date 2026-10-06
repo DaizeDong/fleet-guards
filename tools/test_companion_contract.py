@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from make_fixtures import _no_window
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -98,7 +99,7 @@ def _case(make, envf=None, tmp=None):
         dst = os.path.join(repo, "tools", "datadir.py")
         shutil.copy(str(DD), dst)
         # datadir derives the sibling from ITS OWN worktree, so this has to be one.
-        subprocess.run(["git", "-C", repo, "init", "-q"], capture_output=True)
+        subprocess.run(["git", "-C", repo, "init", "-q"], capture_output=True, **_no_window())
         _clean_env(home)
         for k, v in ((envf(tmp) if callable(envf) else (envf or {})) or {}).items():
             os.environ[k] = v
@@ -209,7 +210,7 @@ def main():
         home = os.path.join(tmp, "home")
         os.makedirs(home, exist_ok=True)
         shutil.copy(str(DD), os.path.join(repo, "tools", "datadir.py"))
-        subprocess.run(["git", "-C", repo, "init", "-q"], capture_output=True)
+        subprocess.run(["git", "-C", repo, "init", "-q"], capture_output=True, **_no_window())
         inside = os.path.join(repo, "reports")
         os.makedirs(inside, exist_ok=True)
         _clean_env(home)

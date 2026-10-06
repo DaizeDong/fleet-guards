@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pii_guard as g  # noqa: E402
+from make_fixtures import _no_window
 from make_fixtures import synthetic_token, write_policy, write_visibility, write_ci_suite
 from make_fixtures import write_invalid_git_marker, write_stale_guard, structural_probe
 from make_fixtures import write_encoded_record, write_count_policy
@@ -198,7 +199,7 @@ def test_source7_tag_cli_and_push_hook(repo, tmp_path, blocked):
             if os.name == "nt" else Path(shutil.which("bash")))
     result = subprocess.run([str(bash), "--noprofile", "--norc", str(kit / "hooks/pre-push")],
                             cwd=repo.root, env=dict(repo.env, PII_DENYLIST=str(policy)),
-                            capture_output=True, text=True, encoding="utf-8")
+                            capture_output=True, text=True, encoding="utf-8", **_no_window())
     assert result.returncode == (1 if blocked else 0), result.stdout + result.stderr
     if blocked:
         assert "push BLOCKED by pii_guard" in result.stdout + result.stderr
@@ -413,7 +414,8 @@ def _source4_cli(repo, tmp_path, token, *args):
     policy = write_policy(tmp_path / "source4-policy.json", token, g.CANARY_TOKEN)
     return subprocess.run([sys.executable, GUARD, "--repo", repo.root, *args],
                           cwd=repo.root, env=dict(repo.env, PII_DENYLIST=str(policy)),
-                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          **_no_window())
 
 
 def _source4_incremental(repo, tmp_path, token, domain, blocked, revision="HEAD^..HEAD"):
@@ -559,7 +561,8 @@ def test_source4_format2_count_is_mandatory(repo, tmp_path, variant):
     with pytest.raises(g.PolicyError, match="count"):
         g._parse_denylist(str(path))
     result = subprocess.run([sys.executable, GUARD, "--repo", repo.root, "--staged"],
-                            env=dict(repo.env, PII_DENYLIST=str(path)), capture_output=True, text=True)
+                            env=dict(repo.env, PII_DENYLIST=str(path)), capture_output=True, text=True,
+                            **_no_window())
     assert result.returncode != 0, result.stdout + result.stderr
     assert "count" in result.stdout + result.stderr
 
@@ -591,7 +594,8 @@ def test_source4_cli_tree_excludes_real_gitlink_but_explicit_files_scan(tmp_path
     policy_path = write_policy(tmp_path / "cli-policy.json", token, g.CANARY_TOKEN)
     for root, blocked in [(parent, False), (module, True)]:
         result = subprocess.run([sys.executable, GUARD, "--repo", str(root), "--tree"],
-                                env=dict(os.environ, PII_DENYLIST=str(policy_path)), capture_output=True, text=True)
+                                env=dict(os.environ, PII_DENYLIST=str(policy_path)), capture_output=True, text=True,
+                                **_no_window())
         assert result.returncode == (1 if blocked else 0), result.stdout + result.stderr
         assert "NOT scanned" not in result.stdout + result.stderr
 
@@ -635,7 +639,7 @@ def test_source3_native_hook_never_falls_back_to_consumer(repo, tmp_path, hook_n
     else:
         bash = Path(shutil.which("bash"))
     result = subprocess.run([str(bash), "--noprofile", "--norc", str(kit / "hooks" / hook_name)],
-                            cwd=repo.root, env=env, capture_output=True, text=True)
+                            cwd=repo.root, env=env, capture_output=True, text=True, **_no_window())
     assert result.returncode != 0, result.stdout + result.stderr
     assert "missing" in (result.stdout + result.stderr).lower()
     assert not receipt.exists(), "The stale consumer scanner executed"
@@ -777,7 +781,7 @@ def test_source2_history_paths_are_nul_delimited(repo):
     path = " leading\n" + token + "\tentry.txt"
     def pipe(*args, data):
         result = subprocess.run(["git", *args], cwd=repo.root, env=repo.env, input=data,
-                                capture_output=True, text=True, encoding="utf-8")
+                                capture_output=True, text=True, encoding="utf-8", **_no_window())
         assert result.returncode == 0, result.stderr
         return result.stdout.strip()
     blob = pipe("hash-object", "-w", "--stdin", data="harmless\n")
@@ -879,7 +883,7 @@ def test_source2_ci_boundary_step_executes_and_propagates(tmp_path, outcome):
     assert bash.is_file(), "native Bash required to validate the CI run block"
     env = dict(os.environ, GITHUB_ACTION_PATH=action_path.as_posix())
     result = subprocess.run([str(bash), "--noprofile", "--norc", "-e", "-c", "\n".join(lines)],
-                            cwd=consumer, env=env, capture_output=True, text=True)
+                            cwd=consumer, env=env, capture_output=True, text=True, **_no_window())
     assert (result.returncode == 0) is (outcome == "pass"), result.stdout + result.stderr
     if outcome == "missing":
         assert "::error::" in result.stdout + result.stderr
@@ -1539,7 +1543,7 @@ class Repo(object):
 
     def git(self, *args, **kw):
         p = subprocess.run(["git"] + list(args), cwd=self.root, env=self.env,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, **_no_window())
         if p.returncode != 0 and not kw.get("allow_fail"):
             raise RuntimeError("git %s: %s" % (" ".join(args), p.stderr))
         return p
@@ -1682,7 +1686,7 @@ def _cli(repo, *args):
     env["PYTHONIOENCODING"] = "utf-8"
     p = subprocess.run([sys.executable, GUARD, "--repo", repo.root] + list(args),
                        cwd=repo.root, env=env, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace", **_no_window())
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
@@ -1726,7 +1730,7 @@ def _grant(repo, tmp_path, home_name, token, content):
     p = subprocess.run([sys.executable, GUARD, "grant", "--repo", repo.root,
                         "--token", token, "--reason", "testing", "--nonce", nonce],
                        cwd=repo.root, env=env, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace", **_no_window())
     return p, home
 
 

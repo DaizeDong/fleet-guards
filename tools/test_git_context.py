@@ -6,6 +6,7 @@ import pytest
 
 import data_boundary as db
 import pii_guard as guard
+from make_fixtures import _no_window
 from make_fixtures import (
     companion_environment_cases,
     make_companion_context_fixture,
@@ -137,7 +138,7 @@ def test_public_private_ignore_query_preserves_absent_directory_semantics(
     assert not (repo.root / relative).exists()
     arguments = ("check-ignore", "--no-index", "-q", "--", relative)
     native = subprocess.run(["git", *arguments], cwd=repo.root, env=repo.env,
-                            capture_output=True)
+                            capture_output=True, **_no_window())
     assert native.returncode == status
     with git_environment(monkeypatch, repo.env):
         proof = db.prove_private_companion(repo.root, fixture["receipt"])
@@ -457,7 +458,7 @@ def test_source11_ci_git_context_step_executes_and_propagates(tmp_path, outcome)
     assert bash.is_file(), "native Bash required to validate the CI run block"
     env = dict(os.environ, GITHUB_ACTION_PATH=action_path.as_posix())
     result = subprocess.run([str(bash), "--noprofile", "--norc", "-e", "-c", "\n".join(lines)],
-                            cwd=consumer, env=env, capture_output=True, text=True)
+                            cwd=consumer, env=env, capture_output=True, text=True, **_no_window())
     assert (result.returncode == 0) is (outcome == "pass"), result.stdout + result.stderr
     if outcome == "missing":
         assert "::error::" in result.stdout + result.stderr
@@ -491,7 +492,7 @@ def test_source12_mandatory_hook_tools_must_be_nonempty(
     result = subprocess.run(
         [str(bash), "--noprofile", "--norc", str(fixture["hook"])],
         cwd=fixture["repo"].root, env=fixture["repo"].env,
-        capture_output=True, text=True, encoding="utf-8", input="")
+        capture_output=True, text=True, encoding="utf-8", input="", **_no_window())
     output = result.stdout + result.stderr
     assert result.returncode == (0 if state == "pass" else 1), output
     calls = (fixture["receipt"].read_text(encoding="utf-8").splitlines()

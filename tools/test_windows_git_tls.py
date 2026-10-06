@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import data_boundary as boundary
+from make_fixtures import _no_window
 from make_fixtures import (write_visibility, write_windows_git_tls_fixture, windows_git_tls_cases,
                            make_native_git_tls_companion, make_native_git_tls_selector_case)
 from make_fixtures import git_ssh_launcher_cases, invalid_windows_git_launchers
@@ -90,7 +91,7 @@ def test_native_companion_proof_retains_installed_git_configuration(tmp_path_fac
     assert proven == ["example-owner/demo-config"]
     assert dict(os.environ) == before
     subprocess.run(["git", "-C", str(root), *fixture["disabled_verification"]],
-                   env=fixture["env"], capture_output=True, text=True, check=True)
+                   env=fixture["env"], capture_output=True, text=True, check=True, **_no_window())
     proven, errors = boundary._companion_visibility(str(root), str(visibility))
     assert errors and proven == []
 
@@ -107,5 +108,5 @@ def test_native_companion_setup_cannot_mutate_hook_caller(tmp_path_factory, monk
     assert decoy.git("remote") == ""
     assert not set(case["selectors"]) & set(fixture["env"])
     subprocess.run(["git", "-C", str(fixture["root"]), *fixture["disabled_verification"]],
-                   env=fixture["env"], capture_output=True, text=True, check=True)
+                   env=fixture["env"], capture_output=True, text=True, check=True, **_no_window())
     assert (decoy.root / ".git/config").read_bytes() == before

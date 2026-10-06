@@ -38,6 +38,7 @@ import subprocess
 import sys
 
 import pytest
+from make_fixtures import _no_window
 from make_fixtures import write_record, write_visibility
 from make_fixtures import write_invalid_git_marker
 from make_fixtures import write_ssh_config, make_ssh_layout
@@ -223,7 +224,7 @@ def git(repo, *args):
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
     p = subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=env)
+                       encoding="utf-8", errors="replace", env=env, **_no_window())
     assert p.returncode == 0, "git %s failed in %s:\n%s" % (" ".join(args), repo, p.stderr)
     return p.stdout
 
@@ -237,7 +238,8 @@ def run_guard(repo, *args, env_extra=None, path=None, guard_path=None):
     if env_extra:
         env.update(env_extra)
     p = subprocess.run([sys.executable, str(guard_path or GUARD), "--repo", str(repo), *args],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
+                       **_no_window())
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
@@ -767,7 +769,7 @@ def test_source2_companion_attests_redirected_data_destination(tmp_path):
     link = companion / "data"
     if os.name == "nt":
         result = subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, **_no_window())
         assert result.returncode == 0, result.stdout + result.stderr
     else:
         link.symlink_to(target, target_is_directory=True)
@@ -1024,7 +1026,8 @@ def test_source2_untracked_generated_run_shaped_fixture_is_exempt(tmp_path):
     destination = repo / "runs"
     destination.mkdir()
     generated = subprocess.run([sys.executable, str(repo / "tools/make_fixtures.py"),
-                                "--out", str(destination)], capture_output=True, text=True)
+                                "--out", str(destination)], capture_output=True, text=True,
+                                **_no_window())
     assert generated.returncode == 0, generated.stderr
     rc, out = run_guard(repo)
     assert rc == CLEAN, out

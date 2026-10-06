@@ -11,6 +11,7 @@ import urllib.request
 
 import pytest
 
+from make_fixtures import _no_window
 from make_fixtures import (fleet_unknown_route, fleet_visibility_payload, make_fleet_receipt_alias,
                            make_fleet_visibility_fixture)
 
@@ -118,7 +119,7 @@ def test_missing_credentials_fail_before_any_dispatch(monkeypatch):
 
 @pytest.fixture
 def hook_checkout(tmp_path, monkeypatch):
-    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, **_no_window())
     monkeypatch.chdir(tmp_path)
     directory = tmp_path / ".githooks"
     directory.mkdir()
@@ -126,7 +127,7 @@ def hook_checkout(tmp_path, monkeypatch):
         path = directory / name
         path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         path.chmod(0o755)
-        subprocess.run(["git", "add", "--chmod=+x", str(path)], check=True)
+        subprocess.run(["git", "add", "--chmod=+x", str(path)], check=True, **_no_window())
     return directory
 
 
@@ -141,7 +142,8 @@ def test_missing_hook_is_rejected(hook_checkout):
 
 
 def test_hook_without_executable_git_mode_is_rejected(hook_checkout):
-    subprocess.run(["git", "update-index", "--chmod=-x", ".githooks/pre-commit"], check=True)
+    subprocess.run(["git", "update-index", "--chmod=-x", ".githooks/pre-commit"], check=True,
+                   **_no_window())
     with pytest.raises(RuntimeError, match="non-executable"):
         module().require_hooks()
 

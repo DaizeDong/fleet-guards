@@ -8,6 +8,7 @@ import pytest
 
 import data_boundary as boundary
 import publication_guard as publication
+from make_fixtures import _no_window
 from make_fixtures import make_publication_fixture, publication_metadata_cases
 from make_fixtures import publication_metadata_environment_cases, publication_invalid_metadata_targets
 from make_fixtures import publication_changed_response_urls
@@ -26,7 +27,7 @@ def invoke(fixture, phase, destination=None):
         if phase == "pre-push":
             command += ["--", "origin", destination or fixture["url"]]
     return subprocess.run(command, cwd=repo.root, env=repo.env, input="",
-                          capture_output=True, text=True, encoding="utf-8")
+                          capture_output=True, text=True, encoding="utf-8", **_no_window())
 
 
 @pytest.mark.parametrize("phase", ["pre-commit", "pre-push", "ci"])
@@ -92,7 +93,7 @@ def test_explicit_raw_scanners_remain_public_diagnostics(tmp_path):
                                       ("data_boundary.py", [], "DATA-TRACKED")):
         result = subprocess.run([sys.executable, str(fixture["kit"] / "tools" / scanner), *options],
                                 cwd=fixture["repo"].root, env=fixture["repo"].env,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, **_no_window())
         assert result.returncode == 1
         assert finding in result.stdout + result.stderr
 
@@ -196,7 +197,7 @@ def test_hook_only_normalizes_git_native_default(tmp_path, monkeypatch, value, p
     fixture = make_publication_fixture(tmp_path, SOURCE)
     environment = fixture["repo"].env
     native = subprocess.run(["git", "--exec-path"], env=environment, capture_output=True,
-                            text=True, check=True).stdout.strip()
+                            text=True, check=True, **_no_window()).stdout.strip()
     selected = native if value == "native" else fixture["unproved_exec"]
     with git_environment(monkeypatch, dict(environment, GIT_EXEC_PATH=selected)):
         with publication.native_hook_environment(phase):

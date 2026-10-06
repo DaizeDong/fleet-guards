@@ -27,6 +27,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pii_guard as g  # noqa: E402
+from make_fixtures import _no_window
 
 
 def scan(text, allow=(), deny=(), strict=True):
@@ -379,12 +380,12 @@ def _guard_run(args, cwd, env_overrides=None):
     env = dict(os.environ)
     env.update(env_overrides or {})
     return subprocess.run([sys.executable, g.__file__] + args, cwd=str(cwd),
-                          capture_output=True, text=True, env=env)
+                          capture_output=True, text=True, env=env, **_no_window())
 
 
 def _inside_a_repo(d):
     return subprocess.run(["git", "-C", str(d), "rev-parse", "--show-toplevel"],
-                          capture_output=True).returncode == 0
+                          capture_output=True, **_no_window()).returncode == 0
 
 
 def test_a_failed_git_call_raises_and_carries_gits_stderr():
@@ -401,7 +402,8 @@ def test_allow_fail_returns_none_which_is_not_an_empty_answer():
 
 
 def test_a_successful_git_call_with_no_output_still_returns_empty_string(tmp_path):
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True,
+                   **_no_window())
     assert g._run(["git", "ls-files"], str(tmp_path)) == ""      # not None: git worked
 
 
@@ -450,7 +452,8 @@ def test_git_missing_from_path_exits_nonzero_with_a_readable_message(tmp_path):
 def test_a_repo_tracking_zero_files_says_so_instead_of_printing_only_clean(tmp_path):
     """Zero tracked files in a REAL repo is legitimate, so it stays exit 0 -- but it must not be
     reported in the same words as a scan that actually read something."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True,
+                   **_no_window())
     p = _guard_run(["--tree", "--repo", "."], tmp_path)
     assert p.returncode == 0
     assert "tracks 0 files" in p.stderr
@@ -459,9 +462,11 @@ def test_a_repo_tracking_zero_files_says_so_instead_of_printing_only_clean(tmp_p
 
 def test_a_clean_report_states_how_much_was_examined(tmp_path):
     """'clean' with no count is the string that hid the fail-open for months."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True,
+                   **_no_window())
     (tmp_path / "a.md").write_text("nothing private here\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "a.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "a.md"], check=True, capture_output=True,
+                   **_no_window())
     p = _guard_run(["--tree", "--repo", "."], tmp_path)
     assert p.returncode == 0 and "1 file(s) scanned" in p.stdout
 

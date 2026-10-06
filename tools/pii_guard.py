@@ -86,6 +86,54 @@ import re
 import subprocess
 import sys
 
+
+# ------------------------------------------------- spawning processes (identical in every kit file)
+# A console program started by a process that has NO console (pythonw, a scheduled task, a service)
+# is handed a brand-new console, and Windows shows it as a window. Measured 2026-10-05: a daemon
+# under pythonw ran a companion proof on every log line, each proof ran about 19 git commands, and
+# the machine took roughly 9,000 terminal windows in eight hours. So every spawn in this kit goes
+# through _no_window(), and tools/test_no_console_window.py fails on any spawn that does not.
+#
+# The flag is added ONLY when this process has no console. A process that has one already shares it
+# with its children and never opens a window; giving those children CREATE_NO_WINDOW would instead
+# move their unredirected output and terminal prompts into a hidden console, where a hook's findings
+# would vanish (measured: an unredirected child's output is simply lost). DETACHED_PROCESS and
+# CREATE_NEW_CONSOLE are refused outright: the first makes Windows ignore CREATE_NO_WINDOW and
+# leaves a console-less child whose own children open windows again, and the second opens a window
+# by definition.
+#
+# Each file carries its own copy because consumers load these files one at a time by path; a
+# shared sibling module would be a new way for a single copied file to fail. That test holds
+# every copy identical, so the copies cannot drift.
+def _console_less_windows():
+    """True on Windows when this process has no console, so a console child would get a window.
+
+    A hidden console counts as a console: children of a CREATE_NO_WINDOW child share it unseen.
+    If the console cannot be queried the answer is True, the side on which no window can open.
+    """
+    import sys
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return not ctypes.WinDLL("kernel32").GetConsoleCP()
+    except (ImportError, AttributeError, OSError):
+        return True
+
+
+def _no_window(**kwargs):
+    """Return subprocess keywords that can never open a console window.
+
+    Merges into any creationflags the caller passes: subprocess.run(args, **_no_window(cwd=root)).
+    """
+    flags = kwargs.get("creationflags", 0) or 0
+    if flags & 0x00000018:              # DETACHED_PROCESS | CREATE_NEW_CONSOLE
+        raise ValueError("DETACHED_PROCESS and CREATE_NEW_CONSOLE can open console windows")
+    if _console_less_windows():
+        kwargs["creationflags"] = flags | 0x08000000      # CREATE_NO_WINDOW
+    return kwargs
+
+
 # ---------------------------------------------------------------- the synthetic namespace (ALLOW)
 # The ONLY identifiers a public repo may contain. Everything else that LOOKS like a real-world
 # identifier is a finding. Extend deliberately -- every addition widens what can leak.
@@ -325,7 +373,7 @@ def _run(args, cwd, allow_fail=False):
     # bearing. dash_guard's runner already did this; this one was the outlier.
     try:
         p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", env=_git_env())
+                           encoding="utf-8", errors="replace", env=_git_env(), **_no_window())
     except (OSError, ValueError) as e:
         if allow_fail:
             return None
@@ -1531,7 +1579,8 @@ def _run_stdin(args, cwd, payload):
     """Like _run, but feeds stdin and returns BYTES. Blobs are not necessarily text."""
     try:
         p = subprocess.run(args, cwd=cwd, input=payload.encode("utf-8"),
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_git_env())
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_git_env(),
+                           **_no_window())
     except OSError as e:
         raise GitError("cannot execute `%s` in %s: %s" % (" ".join(args), cwd, e)) from None
     if p.returncode != 0:
