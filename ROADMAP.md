@@ -22,6 +22,9 @@ which is the single home for that reasoning, and what changed lives in `CHANGELO
   that cannot prove it runs (`hooks/pre-commit`, `hooks/pre-push`).
 - One composite CI action every consumer references by local path, with no step that skips itself
   when its file is absent (`ci/pii-guard/action.yml`).
+- Window-less process spawning: every process the kit starts goes through one helper that gives a
+  console-less caller's children a hidden console, enforced by a structural scan
+  (`tools/test_no_console_window.py`).
 - Automatic submodule synchronization: a verified upstream check dispatches to enrolled consumers,
   which advance their own gitlink through their own gates (`tools/fleet_sync.py`,
   `docs/AUTOMATIC_SYNC.md`, `templates/fleet-sync.yml`).

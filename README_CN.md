@@ -156,6 +156,19 @@ data_boundary: clean (0 DATA + 0 sealed paths not tracked, 0 FIXTUREs generator-
 唯一安全的理由。任何时候看到 guards 目录是空的，答案都是 `git submodule update --init`，永远不是
 `--no-verify`。
 
+## 在 Windows 上起进程
+
+套件起的每一个进程都经过 `_no_window()`，任何绕过它的 `subprocess` 调用、`os.system`、`os.popen` 或进程池，
+都会让 `tools/test_no_console_window.py` 失败。理由是实测出来的，不是推演的：一个自己没有控制台的进程
+（`pythonw`、计划任务、服务）启动控制台程序时，子进程会拿到一个新控制台，而 Windows 会把它显示成一个窗口。
+一个在每行日志都去证明私有伴生仓的守护进程，每次证明跑大约 19 条 git 命令，八小时里弹出了约 9,000 个终端窗口。
+
+这个辅助函数只在调用方没有控制台时才加 `CREATE_NO_WINDOW`。有控制台时，子进程共用它，什么都不会弹出；
+这时再加这个标志，反而会把子进程没有重定向的输出和终端提示挪进一个隐藏控制台，钩子的发现就没人看得到了。
+它拒绝 `DETACHED_PROCESS`，因为 Windows 在它旁边会忽略 `CREATE_NO_WINDOW`，没有控制台的子进程再起的子进程
+又会弹窗；也拒绝 `CREATE_NEW_CONSOLE`，那本身就是一个窗口。每个工具文件各带一份副本，因为消费仓是按路径
+一个文件一个文件加载的；同一个测试保证每份副本完全一致。
+
 ## 局限
 
 **装上这个 submodule 之后，有四件事的行为会变。** 这是在一个真实消费仓上实测的，不是推演的，而且只有

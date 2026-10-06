@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))
-from make_fixtures import package_api_cases
+from make_fixtures import _no_window, package_api_cases
 
 CASES = package_api_cases()
 
@@ -89,7 +89,7 @@ def test_scanner_failures_do_not_clear_input(monkeypatch):
 def test_cli_status_and_json(data, code, state):
     api("secrets")
     result = subprocess.run([sys.executable, "-m", "fleet_guards", "scan"],
-                            cwd=ROOT, input=data, capture_output=True, timeout=15)
+                            cwd=ROOT, input=data, capture_output=True, timeout=15, **_no_window())
     assert result.returncode == code
     assert json.loads(result.stdout)["state"] == state
     assert not result.stderr

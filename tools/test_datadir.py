@@ -33,6 +33,7 @@ import shutil
 import subprocess
 
 import pytest
+from make_fixtures import _no_window
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATADIR = os.path.join(HERE, "datadir.py")
@@ -426,7 +427,7 @@ def test_real_git_linked_consumer_with_submodule(tmp_path, monkeypatch):
         env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1",
                    GIT_CONFIG_GLOBAL=str(tmp_path / "absent-gitconfig"), GIT_TERMINAL_PROMPT="0")
         result = subprocess.run(["git", "-C", str(repo), *args], env=env,
-                                capture_output=True, text=True, encoding="utf-8")
+                                capture_output=True, text=True, encoding="utf-8", **_no_window())
         assert result.returncode == 0, result.stderr
         return result.stdout.strip()
 

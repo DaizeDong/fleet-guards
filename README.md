@@ -231,6 +231,23 @@ A plain `git clone` without `--recursive` leaves `guards/` EMPTY. So does a CI c
 rather than passing in silence, which is the only reason this arrangement is safe. If the guards
 directory is ever empty, the answer is `git submodule update --init`, never `--no-verify`.
 
+## Starting processes on Windows
+
+Every process the kit starts goes through `_no_window()`, and `tools/test_no_console_window.py`
+fails on any `subprocess` call, `os.system`, `os.popen` or process pool that does not. The reason is
+measured, not theoretical: a console program started by a process with no console of its own
+(`pythonw`, a scheduled task, a service) gets a new console, and Windows shows it as a window. A
+daemon that proved its private companion on every log line ran about 19 git commands per proof and
+opened roughly 9,000 terminal windows in eight hours.
+
+The helper adds `CREATE_NO_WINDOW` only when the calling process has no console. With a console, the
+children share it, nothing opens, and the flag would instead move their unredirected output and
+terminal prompts into a hidden console where a hook's findings could not be read. It refuses
+`DETACHED_PROCESS`, because Windows ignores `CREATE_NO_WINDOW` alongside it and the console-less
+child's own children open windows again, and `CREATE_NEW_CONSOLE`, which is a window by definition.
+Each tool file carries its own copy, because consumers load these files one at a time by path; the
+same test holds every copy identical.
+
 ## Limitations
 
 **Four things behave differently in a repository that carries this submodule.** Measured on a real

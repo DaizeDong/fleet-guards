@@ -84,6 +84,54 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 
+
+# ------------------------------------------------- spawning processes (identical in every kit file)
+# A console program started by a process that has NO console (pythonw, a scheduled task, a service)
+# is handed a brand-new console, and Windows shows it as a window. Measured 2026-10-05: a daemon
+# under pythonw ran a companion proof on every log line, each proof ran about 19 git commands, and
+# the machine took roughly 9,000 terminal windows in eight hours. So every spawn in this kit goes
+# through _no_window(), and tools/test_no_console_window.py fails on any spawn that does not.
+#
+# The flag is added ONLY when this process has no console. A process that has one already shares it
+# with its children and never opens a window; giving those children CREATE_NO_WINDOW would instead
+# move their unredirected output and terminal prompts into a hidden console, where a hook's findings
+# would vanish (measured: an unredirected child's output is simply lost). DETACHED_PROCESS and
+# CREATE_NEW_CONSOLE are refused outright: the first makes Windows ignore CREATE_NO_WINDOW and
+# leaves a console-less child whose own children open windows again, and the second opens a window
+# by definition.
+#
+# Each file carries its own copy because consumers load these files one at a time by path; a
+# shared sibling module would be a new way for a single copied file to fail. That test holds
+# every copy identical, so the copies cannot drift.
+def _console_less_windows():
+    """True on Windows when this process has no console, so a console child would get a window.
+
+    A hidden console counts as a console: children of a CREATE_NO_WINDOW child share it unseen.
+    If the console cannot be queried the answer is True, the side on which no window can open.
+    """
+    import sys
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return not ctypes.WinDLL("kernel32").GetConsoleCP()
+    except (ImportError, AttributeError, OSError):
+        return True
+
+
+def _no_window(**kwargs):
+    """Return subprocess keywords that can never open a console window.
+
+    Merges into any creationflags the caller passes: subprocess.run(args, **_no_window(cwd=root)).
+    """
+    flags = kwargs.get("creationflags", 0) or 0
+    if flags & 0x00000018:              # DETACHED_PROCESS | CREATE_NEW_CONSOLE
+        raise ValueError("DETACHED_PROCESS and CREATE_NEW_CONSOLE can open console windows")
+    if _console_less_windows():
+        kwargs["creationflags"] = flags | 0x08000000      # CREATE_NO_WINDOW
+    return kwargs
+
+
 MANIFEST = ".dataclass.json"
 
 # A file whose name says "this is a published SHAPE, not a record". Exempt from the shape check, in
@@ -236,7 +284,7 @@ def _run(args, cwd, env=None):
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", env=environment)
+                           encoding="utf-8", errors="replace", env=environment, **_no_window())
     except (OSError, ValueError) as e:
         raise GitError("cannot execute `%s` in %s: %s\n"
                        "  git must be runnable for this check to mean anything."
@@ -462,7 +510,8 @@ def check_fixtures_are_generated(root, m, out):
         return
     with tempfile.TemporaryDirectory() as td:
         p = subprocess.run([sys.executable, gen, "--out", td], cwd=root,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           **_no_window())
         if p.returncode != 0:
             out.append(("GENERATOR-FAILED", "tools/make_fixtures.py",
                         (p.stderr or "").strip().splitlines()[-1] if p.stderr else "non-zero exit"))
@@ -926,7 +975,8 @@ def read_private_companion_git(proof, *arguments):
         raise GitError("Companion configuration changed after PRIVATE proof")
     try:
         result = subprocess.run(["git", *arguments], cwd=proof.root, env=proof._context[2],
-                                capture_output=True, text=True, encoding="utf-8", errors="replace")
+                                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                **_no_window())
     except (OSError, ValueError) as error:
         raise GitError("Read-only companion Git query could not run") from error
     if result.returncode not in accepted:

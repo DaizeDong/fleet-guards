@@ -4,6 +4,53 @@ import hashlib
 from pathlib import Path
 
 
+# ------------------------------------------------- spawning processes (identical in every kit file)
+# A console program started by a process that has NO console (pythonw, a scheduled task, a service)
+# is handed a brand-new console, and Windows shows it as a window. Measured 2026-10-05: a daemon
+# under pythonw ran a companion proof on every log line, each proof ran about 19 git commands, and
+# the machine took roughly 9,000 terminal windows in eight hours. So every spawn in this kit goes
+# through _no_window(), and tools/test_no_console_window.py fails on any spawn that does not.
+#
+# The flag is added ONLY when this process has no console. A process that has one already shares it
+# with its children and never opens a window; giving those children CREATE_NO_WINDOW would instead
+# move their unredirected output and terminal prompts into a hidden console, where a hook's findings
+# would vanish (measured: an unredirected child's output is simply lost). DETACHED_PROCESS and
+# CREATE_NEW_CONSOLE are refused outright: the first makes Windows ignore CREATE_NO_WINDOW and
+# leaves a console-less child whose own children open windows again, and the second opens a window
+# by definition.
+#
+# Each file carries its own copy because consumers load these files one at a time by path; a
+# shared sibling module would be a new way for a single copied file to fail. That test holds
+# every copy identical, so the copies cannot drift.
+def _console_less_windows():
+    """True on Windows when this process has no console, so a console child would get a window.
+
+    A hidden console counts as a console: children of a CREATE_NO_WINDOW child share it unseen.
+    If the console cannot be queried the answer is True, the side on which no window can open.
+    """
+    import sys
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return not ctypes.WinDLL("kernel32").GetConsoleCP()
+    except (ImportError, AttributeError, OSError):
+        return True
+
+
+def _no_window(**kwargs):
+    """Return subprocess keywords that can never open a console window.
+
+    Merges into any creationflags the caller passes: subprocess.run(args, **_no_window(cwd=root)).
+    """
+    flags = kwargs.get("creationflags", 0) or 0
+    if flags & 0x00000018:              # DETACHED_PROCESS | CREATE_NEW_CONSOLE
+        raise ValueError("DETACHED_PROCESS and CREATE_NEW_CONSOLE can open console windows")
+    if _console_less_windows():
+        kwargs["creationflags"] = flags | 0x08000000      # CREATE_NO_WINDOW
+    return kwargs
+
+
 def https_transport_cases():
     """Generate transport policy cases without contacting or configuring a real remote."""
     cases = [{"id": "canonical", "config": [], "env": {}, "blocked": False}]
@@ -253,7 +300,8 @@ def make_tree_ref_fixture(repo, shape, blocked, with_commit=False, annotated=Fal
 
     def object_command(arguments, payload):
         result = subprocess.run(["git", *arguments], cwd=repo.root, env=repo.env,
-                                input=payload, capture_output=True, text=True, encoding="utf-8")
+                                input=payload, capture_output=True, text=True, encoding="utf-8",
+                                **_no_window())
         if result.returncode:
             raise RuntimeError(result.stderr)
         return result.stdout.strip()
@@ -457,7 +505,7 @@ def make_install_alias(alias, target):
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
                         "$ErrorActionPreference='Stop'; New-Item -ItemType Junction "
                         "-Path $env:FG_FIXTURE_ALIAS -Target $env:FG_FIXTURE_TARGET | Out-Null"],
-                       env=env, check=True, capture_output=True)
+                       env=env, check=True, capture_output=True, **_no_window())
     else:
         alias.symlink_to(target, target_is_directory=True)
     return alias
@@ -529,7 +577,7 @@ class GitContextFixture:
         import subprocess
         result = subprocess.run(["git", *arguments], cwd=self.root, env=env or self.env,
                                 input=payload.encode("utf-8") if payload is not None else None,
-                                capture_output=True)
+                                capture_output=True, **_no_window())
         if result.returncode:
             raise RuntimeError("synthetic Git setup failed: " + result.stderr.decode("utf-8", "replace"))
         return result.stdout.decode("utf-8").strip()
@@ -1087,7 +1135,7 @@ def make_native_git_tls_companion(root):
     commands = [["init", "-q"], ["remote", "add", "origin", "https://github.com/example-owner/demo-config.git"]]
     for args in commands:
         subprocess.run(["git", "-C", str(root), *args], env=environment,
-                       capture_output=True, text=True, check=True)
+                       capture_output=True, text=True, check=True, **_no_window())
     return {"root": root, "visibility": {"example-owner/demo-config": "PRIVATE"},
             "env": environment,
             "disabled_verification": ["config", "http.sslVerify", "false"]}

@@ -45,6 +45,23 @@ All notable changes to this project are documented here (Keep a Changelog style)
   no literal to read, the three prose copies are held in step by attention, which `ROADMAP.md` lists
   as planned work rather than as a solved problem.
 
+### Fixed
+
+- **No process the kit starts can open a console window.** A daemon running under `pythonw` proved
+  its private companion on every log line. Each proof ran about 19 git commands through
+  `data_boundary.py`, none of them asked for a hidden console, and a process with no console hands
+  every console child a new one, which Windows shows as a window: roughly 9,000 terminal windows in
+  eight hours. Every spawn in `tools/` now passes through `_no_window()`, which adds
+  `CREATE_NO_WINDOW` when the caller has no console and changes nothing when it has one, because a
+  shared console never opens a window and hiding it would swallow a hook's unredirected findings
+  (measured: an unredirected child's output is lost under the flag). `DETACHED_PROCESS` and
+  `CREATE_NEW_CONSOLE` are refused. `tools/test_no_console_window.py` checks every copy of the
+  helper, scans every Python file in the kit for a spawn that bypasses it with thirteen planted
+  bypasses as negative controls, and runs the companion proof, its read-only queries, the resolver
+  lookup, the fixture check and the scanners' git runners with `Popen` recorded. On Windows it also
+  runs the incident's own shape for real: `pythonw` calling `data_boundary._run`, whose child must
+  have a console and no visible window.
+
 ## [0.1.0] - 2026-09-22
 
 ### Added
