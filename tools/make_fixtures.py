@@ -85,6 +85,29 @@ def https_transport_cases():
                 "SSL_CERT_FILE", "ssl_cert_dir", "GIT_EXEC_PATH", "GIT_HTTP_USER_AGENT"):
         cases.append({"id": "env-" + key, "config": [], "env": {key: "synthetic-override"},
                       "blocked": True})
+    loopback = "http://127.0.0.1:8788"
+    for case_id, env, blocked in (
+            ("proxy-bypass-exact", {"HTTPS_PROXY": loopback, "NO_PROXY": "github.com"}, False),
+            ("proxy-bypass-dot", {"https_proxy": loopback, "no_proxy": ".GitHub.com"}, False),
+            ("proxy-bypass-list", {"HTTPS_PROXY": loopback, "https_proxy": loopback,
+                                   "NO_PROXY": "localhost,127.0.0.1,::1, github.com",
+                                   "NODE_EXTRA_CA_CERTS": "synthetic-ca.pem"}, False),
+            ("proxy-bypass-all", {"All_Proxy": loopback, "NO_PROXY": " * "}, False),
+            ("proxy-bypass-loopback-only", {"HTTPS_PROXY": loopback, "NO_PROXY": "localhost,127.0.0.1"}, True),
+            ("proxy-bypass-subdomain", {"HTTPS_PROXY": loopback, "NO_PROXY": "gist.github.com"}, True),
+            ("proxy-bypass-lookalike", {"HTTPS_PROXY": loopback, "NO_PROXY": "github.com.example.invalid"}, True),
+            ("proxy-bypass-port", {"HTTPS_PROXY": loopback, "NO_PROXY": "github.com:443"}, True),
+            ("proxy-bypass-space-list", {"HTTPS_PROXY": loopback, "NO_PROXY": "localhost github.com"}, True),
+            ("proxy-bypass-star-entry", {"HTTPS_PROXY": loopback, "NO_PROXY": "localhost,*"}, True),
+            ("proxy-bypass-split-spelling", {"HTTPS_PROXY": loopback, "NO_PROXY": "github.com",
+                                             "no_proxy": "localhost"}, True),
+            ("proxy-bypass-keeps-trust", {"HTTPS_PROXY": loopback, "NO_PROXY": "github.com",
+                                          "SSL_CERT_FILE": "synthetic-ca.pem"}, True),
+            ("proxy-bypass-keeps-git-env", {"HTTPS_PROXY": loopback, "NO_PROXY": "github.com",
+                                            "GIT_SSL_NO_VERIFY": "1"}, True)):
+        cases.append({"id": case_id, "config": [], "env": env, "blocked": blocked})
+    cases.append({"id": "proxy-bypass-keeps-config", "config": [("http.proxy", loopback)],
+                  "env": {"NO_PROXY": "github.com"}, "blocked": True})
     for value in ("true", "YES", "On", "1"):
         cases.append({"id": "verification-" + value, "config": [("http.sslVerify", value)],
                       "env": {}, "blocked": False})

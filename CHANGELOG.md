@@ -6,6 +6,12 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Changed
 
+- **PRIVATE companion proofs respect explicit proxy bypass rules.** When a
+  supported proxy is bypassed for every GitHub transport route, the proof
+  validates that effective route instead of rejecting the unused proxy.
+  Ambiguous or unproved overrides remain refused; synthetic fixtures cover
+  both the permitted bypass and blocked transport cases.
+
 - **docs: unify repo structure (Skill Repo Spec v1).** The README keeps its substance and takes the
   spec's section order, philosophy first, with an honest badge row. `README_CN.md` was added as a
   section for section counterpart, and the mandatory `ROADMAP.md` and `CHANGELOG.md` alongside it.
