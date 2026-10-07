@@ -991,6 +991,32 @@ _HTTPS_PERFORMANCE_KEYS = {
     "lowspeedtime", "keepaliveidle", "keepaliveinterval", "keepalivecount",
 }
 _HTTPS_PERFORMANCE_ENV = {"git_http_low_speed_limit", "git_http_low_speed_time"}
+_PROXY_ENV = {"http_proxy", "https_proxy", "all_proxy"}
+_GITHUB_NO_PROXY = {"github.com", ".github.com"}
+
+
+def _no_proxy_exempts_github(env):
+    """Prove that an environment proxy cannot carry Git's connection to github.com.
+
+    Git hands NO_PROXY/no_proxy to libcurl as CURLOPT_NOPROXY, and libcurl then connects
+    directly to an exempted host whatever proxy the environment names. A launcher that
+    proxies only its own API traffic (a local split-billing tunnel) can therefore keep
+    github.com on the default route. Only forms that every supported libcurl reads the
+    same way count: the whole value "*", or a comma-separated entry that is exactly
+    github.com or .github.com. Every spelling present must exempt it, because which one
+    Git reads differs between Windows and POSIX. Trust overrides are judged separately.
+    """
+    values = [value for name, value in env.items() if name.casefold() == "no_proxy"]
+    if not values:
+        return False
+    for value in values:
+        if not isinstance(value, str):
+            return False
+        if value.strip() == "*":
+            continue
+        if not any(entry.strip().casefold() in _GITHUB_NO_PROXY for entry in value.split(",")):
+            return False
+    return True
 
 
 def _git_bundled_ca(value, env):
@@ -1038,13 +1064,17 @@ def _https_configuration_problem(config_entries, env):
 
     A PRIVATE receipt identifies the repository, but cannot authorize a different
     connection selected by a proxy, resolver, custom trust file, or transport helper.
-    Standard TLS backends and Git for Windows' own bundle preserve default trust.
+    Standard TLS backends and Git for Windows' own bundle preserve default trust. A
+    proxy variable is not an override when NO_PROXY exempts github.com for Git.
     Diagnostics name only the category; configuration values can contain secrets.
     """
+    bypassed = _no_proxy_exempts_github(env)
     for name in env:
         key = name.casefold()
-        if (key in {"http_proxy", "https_proxy", "all_proxy", "curl_ca_bundle",
-                    "ssl_cert_file", "ssl_cert_dir", "curl_ssl_backend", "git_exec_path"}
+        if key in _PROXY_ENV and bypassed:
+            continue
+        if (key in _PROXY_ENV | {"curl_ca_bundle", "ssl_cert_file", "ssl_cert_dir",
+                                 "curl_ssl_backend", "git_exec_path"}
                 or key.startswith(("git_ssl_", "git_proxy_ssl_"))
                 or (key.startswith("git_http_") and key not in _HTTPS_PERFORMANCE_ENV)):
             return "unproved HTTPS environment override"
