@@ -2,6 +2,9 @@
 
 这个舰队的闸门套件，集中在一个仓库里，以 git submodule 的形式被消费：九条检测规则、一道数据边界，以及一组在自己缺席时拒绝放行的钩子。
 
+Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACKAGE.md)。包版本 0.2.1 将现有
+解析器与 PRIVATE 准入实现映射进 wheel；消费方显式提供自己的根目录，源码里只保留一份实现。
+
 [![守卫套件](https://img.shields.io/badge/%E5%AE%88%E5%8D%AB%E5%A5%97%E4%BB%B6-Git%20%E5%AD%90%E6%A8%A1%E5%9D%97-orange?style=flat)](#安装)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![检测规则](https://img.shields.io/badge/%E6%A3%80%E6%B5%8B%E8%A7%84%E5%88%99-9-green?style=flat)](#里面有什么)

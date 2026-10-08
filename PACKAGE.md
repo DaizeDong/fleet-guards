@@ -1,17 +1,41 @@
 # Shared Python API
 
-Version 0.2.0 packages the credential scanner and filesystem primitives used by
+Version 0.2.1 packages the credential scanner, filesystem primitives and canonical runtime tools used by
 Python consumers. Install a wheel built from an accepted source revision and
 record both the revision and wheel hash in the deployment lock.
 
-This release has a narrower module surface than the earlier 0.1.0 package:
-`fleet_guards.datadir` and `_datadir` are not shipped. The standalone
-`tools/datadir.py` resolver remains part of the Git guard kit. Its current
-signature does not implement the earlier package facade's explicit consumer
-context, so this build does not expose that facade or bundle a second resolver.
-Callers that need it must keep their existing accepted release until that API has
-a separate compatibility migration. Importing the package or its CLI does not
-load the resolver. Git hooks and publication policy retain their existing paths.
+`fleet_guards.runtime` exposes the existing resolver and PRIVATE admission
+implementations. The wheel maps four canonical `tools/` modules into an internal
+namespace at build time; their bytes match the source files. There is no second
+resolver implementation. Source toolkit calls keep their existing discovery
+context, while package callers must supply their own source or installation root.
+The older `fleet_guards.datadir` and `_datadir` module names remain absent.
+Importing the package or its CLI does not load the resolver. Git hooks and
+publication policy retain their existing paths.
+
+## Companion discovery and write admission
+
+```python
+from fleet_guards.runtime import companion_resolver, authorize_artifact_write
+
+resolver = companion_resolver(source_root=absolute_consumer_root)
+companion = resolver.resolve_companion_root("example-tool")
+data = resolver.resolve_data_dir("example-tool")
+```
+
+The bound root controls sibling discovery and own-source exclusion. It must be
+absolute, and each resolver retains its own immutable binding. Existing source
+toolkit calls without `source_root` still derive the consumer above a Guards
+submodule. Discovery identifies a location; it does not establish PRIVATE
+transport authority or artifact ownership.
+
+`prove_private_companion(destination, visibility_map=...)` exposes the current
+physical and effective Git-route proof. `authorize_artifact_write(source_root,
+companion_root, relative_path, **options)` applies the canonical storage contract,
+path checks, current PRIVATE proof and ignore checks described in
+[STORAGE_CONTRACT.md](docs/STORAGE_CONTRACT.md). Both remain read-only, and neither
+proof is a filesystem lock. Repeat admission before a write. The wheel includes
+the proof's visibility-receipt dependency, and missing or stale proof fails closed.
 
 ## Credential scanning
 

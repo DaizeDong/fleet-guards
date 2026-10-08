@@ -104,4 +104,6 @@ The reusable validation/matching primitives retain Smith's existing names:
 `validate_contract(repo)`, `in_data_scope`, `matches`, `no_links`, `owners`, and
 `canonical_hash`. Validation and admission propagate filesystem failures; a
 missing or unreadable contract is not an empty policy. The Guards `tools/` API is
-consumed through the pinned checkout, independently of the smaller wheel API.
+consumed through the pinned checkout. Python package 0.2.1 also exposes admission
+through `fleet_guards.runtime`; its wheel maps this same source implementation
+and its PRIVATE proof dependencies, without maintaining a second policy engine.

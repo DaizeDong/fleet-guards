@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fleet-guards"
-version = "0.2.0"
+version = "0.2.1"
 description = "Shared credential detection and safe filesystem primitives"
 readme = "PACKAGE.md"
 license = {file = "LICENSE"}
@@ -15,4 +15,7 @@ dependencies = []
 fleet-guards = "fleet_guards.__main__:main"
 
 [tool.setuptools]
-packages = ["fleet_guards"]
+packages = ["fleet_guards", "fleet_guards._canonical"]
+
+[tool.setuptools.package-dir]
+"fleet_guards._canonical" = "tools"

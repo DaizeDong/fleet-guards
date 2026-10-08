@@ -2,6 +2,9 @@
 
 Current: **v0.1.0**
 
+Shared Python package: **v0.2.1**, including consumer-bound canonical runtime
+discovery and read-only PRIVATE artifact admission. See [PACKAGE.md](PACKAGE.md).
+
 ## v0.1.0 (current)
 
 Feature names only. Why each one behaves the way it does lives in the tool that implements it,

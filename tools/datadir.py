@@ -135,9 +135,18 @@ def _own_repo_root():
         d = parent
 
 
-def _reject_if_inside_own_repo(p, skill):
+def _source_root(source_root):
+    if source_root is None:
+        return _own_repo_root()
+    path = Path(source_root)
+    if not path.is_absolute():
+        raise ValueError("source_root must be absolute")
+    return str(path.resolve())
+
+
+def _reject_if_inside_own_repo(p, skill, *, source_root=None):
     try:
-        root = _own_repo_root()
+        root = _source_root(source_root)
         if root is None:
             return                   # not deployed from a worktree; nothing to be inside of
         target, repo = os.path.realpath(str(p)), os.path.realpath(root)
@@ -159,7 +168,7 @@ def _reject_if_inside_own_repo(p, skill):
 
 
 
-def assert_outside_own_repo(p, skill):
+def assert_outside_own_repo(p, skill, *, source_root=None):
     """PUBLIC name for the own-repo rejection. Callers outside this module use THIS.
 
     It is a one-line wrapper and it has now been deleted twice by refactors that saw a private
@@ -172,10 +181,10 @@ def assert_outside_own_repo(p, skill):
     is not free to remove this name. It is the only thing standing between a writer and its own
     public repo, and its entire value is that callers can reach it.
     """
-    return _reject_if_inside_own_repo(p, skill)
+    return _reject_if_inside_own_repo(p, skill, source_root=source_root)
 
 
-def _convention_roots(skill):
+def _convention_roots(skill, *, source_root=None):
     """The fleet convention: a skill's companion repo is its SIBLING, named `<skill>-config`.
 
     Every companion repo in this fleet already follows this. Nothing looked for it, and that
@@ -197,7 +206,7 @@ def _convention_roots(skill):
     under the scripts directory), there is no sibling to infer and this contributes nothing;
     resolution then falls back to the env vars and dotfiles as before.
     """
-    root = _own_repo_root()
+    root = _source_root(source_root)
     if root is None:
         return []
     return [Path(root).parent / ("%s-config" % skill)]
@@ -340,7 +349,7 @@ def _unproven_error(skill, dirs):
            "\n".join("      %s" % d for d in dirs), _MARKER, skill, _config_env_vars(skill)[0]))
 
 
-def _candidates(skill):
+def _candidates(skill, *, source_root=None):
     """Discovery order, as (Path, explicit) pairs. See the module docstring.
 
     `explicit` marks a path that carries the operator's INTENT on its face: an environment
@@ -371,7 +380,7 @@ def _candidates(skill):
     # The convention comes BEFORE the dotfiles: when a skill has a real companion repo beside it,
     # that repo is the answer, and a leftover dotfile must not shadow it. It comes AFTER the env
     # vars so an explicit override still wins.
-    for root in _convention_roots(skill):
+    for root in _convention_roots(skill, source_root=source_root):
         out.append((root / "data", False))
         out.append((root, False))
     dot = Path(os.path.expanduser("~/.%s-config" % skill))
@@ -386,7 +395,7 @@ def _candidates(skill):
     return out
 
 
-def resolve_companion_root(skill):
+def resolve_companion_root(skill, *, source_root=None):
     """The private companion REPO root for `skill`, or None. Never a path inside the skill's repo.
 
     resolve_data_dir answers "where does real-run output go", which is usually `<companion>/data`.
@@ -411,7 +420,7 @@ def resolve_companion_root(skill):
     would mean answering "uninitialised" while a directory the operator can see sits right there.
     """
     unproven = []
-    for p, explicit in _candidates(skill):
+    for p, explicit in _candidates(skill, source_root=source_root):
         if not p.is_dir():
             continue
         # _candidates yields <root>/data before <root>. A caller asking for the companion ROOT gets
@@ -421,20 +430,22 @@ def resolve_companion_root(skill):
             if root not in unproven:
                 unproven.append(root)
             continue
-        _reject_if_inside_own_repo(root, skill)
+        _reject_if_inside_own_repo(root, skill, source_root=source_root)
         return root
     if unproven:
         raise _unproven_error(skill, unproven)
     return None
 
 
-def resolve_data_dir(skill, create=False):
+def resolve_data_dir(skill, create=False, *, source_root=None):
     """Return the private data dir for `skill`, or None if the tool is uninitialized.
 
     Raises DataDirInsideOwnRepo if the resolved directory sits inside this skill's own repo, and
     CompanionUnproven if the only thing found was a directory that cannot show it is the companion.
+    Package callers supply source_root to bind sibling discovery and source exclusion to the
+    consumer. Standalone toolkit calls omit it and retain submodule-based discovery.
     """
-    candidates = _candidates(skill)
+    candidates = _candidates(skill, source_root=source_root)
     unproven = []
     for p, explicit in candidates:
         if not p.is_dir():
@@ -447,7 +458,7 @@ def resolve_data_dir(skill, create=False):
                 if root not in unproven:
                     unproven.append(root)
                 continue
-        _reject_if_inside_own_repo(p, skill)
+        _reject_if_inside_own_repo(p, skill, source_root=source_root)
         return p
     if unproven:
         raise _unproven_error(skill, unproven)
@@ -460,15 +471,15 @@ def resolve_data_dir(skill, create=False):
                 "Initialize the private companion repository, or set %s or %s to its destination."
                 % (skill, _config_env_vars(skill)[0], _env_var(skill)))
         p = candidates[0][0]
-        _reject_if_inside_own_repo(p, skill)
+        _reject_if_inside_own_repo(p, skill, source_root=source_root)
         p.mkdir(parents=True, exist_ok=True)
         return p
     return None
 
 
-def data_path(skill, relpath, create=False):
+def data_path(skill, relpath, create=False, *, source_root=None):
     """Resolve <private data dir>/<relpath>. Never returns a path inside the repo."""
-    base = resolve_data_dir(skill, create=create)
+    base = resolve_data_dir(skill, create=create, source_root=source_root)
     if base is None:
         raise DataDirNotInitialized(
             "%s has no private data directory, so it has nowhere to put real-run output.\n"
@@ -481,7 +492,7 @@ def data_path(skill, relpath, create=False):
             "(<file>.example) and a synthetic fixture set."
             % (skill, _config_env_vars(skill)[0], skill, _env_var(skill)))
     p = base / relpath
-    _reject_if_inside_own_repo(p, skill)
+    _reject_if_inside_own_repo(p, skill, source_root=source_root)
     try:
         p.resolve().relative_to(base.resolve())
     except ValueError:
