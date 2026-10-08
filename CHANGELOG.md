@@ -6,6 +6,10 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Changed
 
+- **Concrete artifact paths accept literal square brackets.** Write admission
+  permits bracketed filenames while continuing to reject wildcard characters;
+  declared path patterns retain their existing character-class semantics.
+
 - **PRIVATE companion proofs respect explicit proxy bypass rules.** When a
   supported proxy is bypassed for every GitHub transport route, the proof
   validates that effective route instead of rejecting the unused proxy.

@@ -35,7 +35,7 @@ def relative_path(value, *, pattern=False):
         if re.match(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³]) *(?:\.|$)",
                     part, re.I):
             raise ValueError("path contains a reserved Windows name")
-        if not pattern and any(c in part for c in "*?["):
+        if not pattern and any(c in part for c in "*?"):
             raise ValueError("retirement requires a concrete path, not a glob")
     if all(character in "*?/" for character in value):
         raise ValueError("repository metadata and unrestricted catch-all paths are forbidden")

@@ -13,6 +13,7 @@ import pii_guard
 import storage_contract as storage
 from make_fixtures import (
     _no_window, GitContextFixture, make_storage_contract_fixture, make_storage_short_name_fixture,
+    storage_literal_path_cases,
 )
 from test_git_context import git_environment
 
@@ -46,6 +47,36 @@ def test_admits_absent_declared_leaf_without_creating_or_modifying_files(layout)
     assert layout["companion"].git("status", "--porcelain", "--untracked-files=all") == before
     with pytest.raises(AttributeError):
         admission.artifact_id = "cache"
+
+
+@pytest.mark.parametrize("relative", storage_literal_path_cases()["literal_paths"])
+def test_concrete_brackets_remain_literal_versionable_files(layout, relative):
+    admission = authorize(layout, relative, artifact_id="runs")
+    assert admission.path == layout["companion"].root / relative
+    assert admission.proof.repositories == ("example-owner/synthetic-private",)
+    assert not admission.path.exists()
+    admission.path.parent.mkdir(parents=True)
+    admitted = authorize(layout, relative, artifact_id="runs")
+    payload = storage_literal_path_cases()["payload"]
+    with admitted.path.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(payload)
+    layout["companion"].git("--literal-pathspecs", "add", "--", relative)
+    layout["companion"].git("commit", "-qm", "synthetic bracketed artifact")
+    assert layout["companion"].git("show", "HEAD:" + relative) == payload.strip()
+    assert admitted.path.read_text(encoding="utf-8") == payload
+
+
+@pytest.mark.parametrize("relative", storage_literal_path_cases()["wildcard_paths"])
+def test_concrete_wildcards_still_fail_before_output_creation(layout, relative):
+    with pytest.raises(ValueError, match="glob"):
+        authorize(layout, relative, artifact_id="runs")
+    assert not (layout["companion"].root / "data").exists()
+
+
+@pytest.mark.parametrize("path,pattern,want", storage_literal_path_cases()["pattern_cases"])
+def test_square_bracket_pattern_classes_keep_existing_glob_semantics(path, pattern, want):
+    assert storage.relative_path(pattern, pattern=True) == pattern
+    assert storage.matches(path, pattern) is want
 
 
 @pytest.mark.parametrize("relative", ["unknown.json", "reports/status.pyc"])

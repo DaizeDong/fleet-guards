@@ -1593,6 +1593,23 @@ def make_storage_contract_fixture(root, refreshed):
             "configuration": configuration, "receipt": receipt}
 
 
+def storage_literal_path_cases():
+    """Synthetic archive names distinguish literal targets from declared pattern syntax."""
+    return {
+        "literal_paths": [
+            "data/runs/acme/archive/general [700000000000000004].html",
+            "data/runs/acme/archive/open [.html",
+            "data/runs/acme/archive/close ].html",
+        ],
+        "wildcard_paths": ["data/runs/acme/archive/*.html", "data/runs/acme/archive/?.html"],
+        "pattern_cases": [
+            ("data/runs/acme/archive/a.html", "data/runs/*/archive/[ab].html", True),
+            ("data/runs/acme/archive/c.html", "data/runs/*/archive/[ab].html", False),
+        ],
+        "payload": "synthetic bracketed artifact\n",
+    }
+
+
 def make_storage_short_name_fixture(layout, kind):
     """Construct NTFS aliases without reading or writing a real repository's files."""
     import ctypes
