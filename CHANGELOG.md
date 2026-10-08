@@ -29,6 +29,12 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Added
 
+- **Package runtime API 0.2.1.** `fleet_guards.runtime` binds canonical companion
+  discovery to an explicit consumer root and exposes current PRIVATE proof and
+  artifact admission. Wheels map the existing source modules without a second
+  implementation; isolated installed-wheel tests cover discovery, source
+  rejection, PRIVATE evidence and undeclared destinations.
+
 - **Source-owned artifact write admission.** `tools/storage_contract.py` holds
   the validation and matching primitives shared with Smith and a read-only
   `authorize_artifact_write` API. It requires a unique declared owner, an exact
