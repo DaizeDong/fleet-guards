@@ -71,6 +71,11 @@ runs:
           echo "::error::the guards submodule has no test_git_context.py -- the Git context suite cannot be skipped"; exit 1; }
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_git_context.py" -q
 
+    - name: Native Git exec-path tests (do hooks preserve transport policy?)
+      shell: bash
+      run: |
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_git_exec_path.py" -q
+
     - name: HTTPS transport tests (are routing and certificate trust preserved?)
       shell: bash
       run: |
