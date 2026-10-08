@@ -21,6 +21,13 @@ Windows device names, alternate streams, repository metadata and unrestricted
 root catch-alls are refused. `*` stays within one segment; `**` spans zero or more
 segments. A writable path must have exactly one artifact owner. `protected_paths`
 contains optional relative patterns for the retirement workflow.
+Patterns made entirely of wildcard segments, including equivalent root catch-all
+spellings such as `**/**`, must name a bounded artifact namespace instead.
+Windows matching folds case so different-case declarations cannot hide multiple
+owners of one physical file. Existing Windows path components must use their
+canonical filesystem spelling; NTFS short names cannot address a different
+artifact or Git metadata through an otherwise valid declaration. Reserved device
+names include console aliases and the Windows superscript COM/LPT forms.
 
 The default `layout` is `separate_companion`: source and companion cannot be the
 same directory or contain one another. An explicit `combined_private_repo`

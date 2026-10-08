@@ -32,11 +32,12 @@ def relative_path(value, *, pattern=False):
     for part in parts:
         if part.casefold() == ".git" or any(ord(c) < 32 or c in '<>|"' for c in part):
             raise ValueError("repository metadata and invalid path characters are forbidden")
-        if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", part, re.I):
+        if re.match(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³]) *(?:\.|$)",
+                    part, re.I):
             raise ValueError("path contains a reserved Windows name")
         if not pattern and any(c in part for c in "*?["):
             raise ValueError("retirement requires a concrete path, not a glob")
-    if value in {"*", "**", "**/*"}:
+    if all(character in "*?/" for character in value):
         raise ValueError("repository metadata and unrestricted catch-all paths are forbidden")
     return value
 
@@ -115,6 +116,8 @@ def in_data_scope(contract, relative):
 
 def matches(path, pattern):
     """Segment glob: * stays within a segment; ** matches zero or more segments."""
+    if os.name == "nt":
+        path, pattern = path.casefold(), pattern.casefold()
     def match(parts, pats):
         if not pats:
             return not parts
@@ -199,6 +202,8 @@ def _destination(root, relative, directory):
             info = node.lstat()
         except FileNotFoundError:
             break
+        if os.name == "nt" and str(node.resolve(strict=True)) != str(node):
+            raise ValueError("noncanonical filesystem alias refuses artifact write")
         if stat.S_ISDIR(info.st_mode):
             try:
                 (node / ".git").lstat()
