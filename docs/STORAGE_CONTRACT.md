@@ -78,6 +78,14 @@ refuse admission. A legitimate linked-worktree `.git` file at the companion root
 is supported. This API loads the boundary implementation beside itself; it does
 not fall back to an ambient or copied checker.
 
+Git supplies `GIT_EXEC_PATH` to hooks even when no custom helper path was selected.
+For SSH and HTTPS, admission accepts it only when an independent local probe of
+the selected Git executable, with that override absent, returns the same existing
+canonical helper directory. Unverified paths, aliases and probe failures remain
+UNKNOWN. This check preserves the caller's environment and does not relax other
+transport or trust overrides. It assumes the selected Git executable is trusted;
+path matching does not authenticate an arbitrary executable supplied through PATH.
+
 The function is read-only and works with absent target paths. It neither discovers
 a companion nor creates data directories. Call the existing shared resolver to
 select a companion, preserve its documented precedence, and pass the exact root

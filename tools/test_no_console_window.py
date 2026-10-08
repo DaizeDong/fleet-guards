@@ -476,3 +476,14 @@ def test_publication_exec_path_probe_is_hidden(popen_record, monkeypatch):
         pass
     assert [args[1:] for args, _ in popen_record] == [["--exec-path"]]
     _assert_all_hidden(popen_record)
+
+
+def test_companion_exec_path_probe_is_hidden(popen_record):
+    environment = {key: value for key, value in os.environ.items() if key.upper() != "GIT_EXEC_PATH"}
+    native = subprocess.run(["git", "--exec-path"], env=environment, capture_output=True,
+                            text=True, check=True, **_no_window()).stdout.strip()
+    environment["GIT_EXEC_PATH"] = native
+    popen_record.clear()
+    assert db._git_exec_path_problem(environment) is None
+    assert [args[1:] for args, _ in popen_record] == [["--exec-path"]]
+    _assert_all_hidden(popen_record)

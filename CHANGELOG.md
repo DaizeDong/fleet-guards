@@ -6,6 +6,12 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Changed
 
+- **PRIVATE companion proofs accept Git's native hook helper path.** SSH and
+  HTTPS share a read-only check against the selected Git executable's default,
+  queried with `GIT_EXEC_PATH` removed only from the probe environment. Custom
+  paths, filesystem aliases and failed probes remain UNKNOWN; other transport
+  overrides retain their existing checks. Synthetic commits exercise real hooks.
+
 - **Concrete artifact paths accept literal square brackets.** Write admission
   permits bracketed filenames while continuing to reject wildcard characters;
   declared path patterns retain their existing character-class semantics.
