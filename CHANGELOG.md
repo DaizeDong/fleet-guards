@@ -36,6 +36,9 @@ All notable changes to this project are documented here (Keep a Changelog style)
   checks before a write. Explicit source `persistence: transient` with a concrete
   reason permits ignored temporary artifacts; rebuildable retention alone does
   not. Publication routes and source policy are rechecked before returning.
+  Equivalent unrestricted root-glob spellings are rejected by the shared validator.
+  Windows case aliases, NTFS short names, and reserved console/device names cannot
+  bypass declaration ownership or address Git metadata.
   The synthetic admission suite runs in the shared CI action. See
   `docs/STORAGE_CONTRACT.md` for the API and its concurrency boundary.
 

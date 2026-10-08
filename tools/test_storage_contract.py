@@ -12,7 +12,7 @@ import data_boundary as boundary
 import pii_guard
 import storage_contract as storage
 from make_fixtures import (
-    _no_window, GitContextFixture, make_storage_contract_fixture,
+    _no_window, GitContextFixture, make_storage_contract_fixture, make_storage_short_name_fixture,
 )
 from test_git_context import git_environment
 
@@ -71,6 +71,12 @@ def test_ambiguous_path_and_wrong_producer_artifact_are_refused(layout):
 def test_noncanonical_paths_are_refused_before_writing(layout, relative):
     with pytest.raises(ValueError):
         authorize(layout, relative)
+
+
+@pytest.mark.parametrize("name", ["CON .txt", "COM¹.txt", "LPT².json", "CONIN$", "CONOUT$"])
+def test_windows_device_aliases_are_rejected_without_opening_them(name):
+    with pytest.raises(ValueError, match="reserved"):
+        storage.relative_path("reports/" + name)
 
 
 @pytest.mark.parametrize("persistence", [None, "versioned"])
@@ -213,6 +219,32 @@ def test_filesystem_aliases_are_refused(layout, tmp_path, kind):
         authorize(layout)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows filesystem alias regression")
+@pytest.mark.parametrize("kind", ["gitfile", "artifact"])
+def test_ntfs_short_names_cannot_bypass_metadata_or_artifact_ownership(layout, kind):
+    root, target, relative = make_storage_short_name_fixture(layout, kind)
+    if Path(relative).name == target.name:
+        pytest.skip("The synthetic volume does not generate NTFS short names")
+    row = copy.deepcopy(layout["contract"]["artifacts"][0])
+    row.update(artifact_id="alias", path_pattern=relative)
+    layout["contract"]["artifacts"].append(row)
+    save_contract(layout)
+    with pytest.raises(ValueError, match="alias|canonical"):
+        storage.authorize_artifact_write(layout["source"].root, root, relative,
+                                         visibility_map=layout["receipt"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows case-insensitive filesystem policy")
+def test_different_case_declarations_cannot_hide_retired_owner(layout):
+    row = copy.deepcopy(layout["contract"]["artifacts"][0])
+    row.update(artifact_id="retired-status", path_pattern="reports/status.JSON")
+    row["retention_rule"]["class"] = "retired"
+    layout["contract"]["artifacts"].append(row)
+    save_contract(layout)
+    with pytest.raises(ValueError, match="owner|ambiguous"):
+        authorize(layout)
+
+
 def test_unborn_private_repository_is_not_versioned_storage(layout):
     layout["companion"].git("update-ref", "-d", "refs/heads/main")
     with pytest.raises(boundary.GitError):
@@ -264,6 +296,14 @@ def test_changes_during_proof_do_not_receive_stale_admission(layout, monkeypatch
 ])
 def test_shared_matcher_preserves_segment_glob_semantics(path, pattern, want):
     assert storage.matches(path, pattern) is want
+
+
+@pytest.mark.parametrize("pattern", ["**/**", "*/**", "**/?*", "***"])
+def test_alternate_root_catchall_spellings_do_not_authorize_unbounded_storage(layout, pattern):
+    layout["contract"]["artifacts"][0]["path_pattern"] = pattern
+    save_contract(layout)
+    with pytest.raises(ValueError, match="catch-all"):
+        storage.validate_contract(layout["source"].root)
 
 
 def test_path_loader_uses_its_pinned_boundary_module_without_sys_path_changes(layout):
