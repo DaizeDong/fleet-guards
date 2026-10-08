@@ -1210,6 +1210,71 @@ def ssh_execution_environment_cases():
             for key in (None, "GIT_EXEC_PATH", "git_exec_path", "GiT_ExEc_PaTh")]
 
 
+def make_native_hook_exec_path_fixture(root, source, transport, refreshed):
+    """Run PRIVATE admission from a real Git hook using only synthetic repositories."""
+    import shlex
+    import sys
+
+    root = Path(root)
+    configuration = write_git_context_configuration(root)
+    companion = GitContextFixture(root / "companion", configuration)
+    invoker = GitContextFixture(root / "invoker", configuration)
+    url = ("git@github.com:example-owner/synthetic-private.git" if transport == "ssh"
+           else "https://github.com/example-owner/synthetic-private.git")
+    companion.git("remote", "add", "origin", url)
+    receipt = write_visibility(root / "visibility.json",
+                               {"example-owner/synthetic-private": "PRIVATE"}, refreshed)
+    report = root / "hook-report.json"
+    ssh_config = root / "synthetic-ssh-config"
+    ssh_config.write_text("", encoding="utf-8")
+    script = root / "hook-probe.py"
+    script.write_text('''import json, os, pathlib, sys
+tools, companion, receipt, report, ssh_config = sys.argv[1:]
+sys.path.insert(0, tools)
+import data_boundary as boundary
+# The real static SSH parser reads this empty fixture, never a user's SSH profile.
+boundary._ssh_config_paths = lambda: [ssh_config]
+before = dict(os.environ)
+inherited = {key: value for key, value in before.items() if key.upper() == 'GIT_EXEC_PATH'}
+assert len(inherited) == 1, 'Git did not supply a unique helper path to its hook'
+try:
+    proof = boundary.prove_private_companion(companion, receipt)
+    result = {'allowed': True, 'repositories': list(proof.repositories)}
+except boundary.GitError as error:
+    result = {'allowed': False, 'error': str(error)}
+result.update(exec_path_present=True, environment_preserved=before == dict(os.environ))
+pathlib.Path(report).write_text(json.dumps(result), encoding='utf-8')
+''', encoding="utf-8")
+    hooks = root / "probe-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    arguments = [sys.executable, "-I", script, Path(source) / "tools",
+                 companion.root, receipt, report, ssh_config]
+    hook.write_text("#!/bin/sh\nexec " + " ".join(shlex.quote(str(arg).replace("\\", "/"))
+                                                 for arg in arguments) + "\n", encoding="utf-8")
+    hook.chmod(0o755)
+    invoker.git("config", "core.hooksPath", str(hooks))
+    # Isolate transport policy from the invoking machine's proxy and trust settings.
+    invoker.env = {key: value for key, value in invoker.env.items()
+                   if key.upper().startswith("GIT_") or key.upper() in {
+                       "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "LANG"}}
+    custom = root / "custom-helpers"
+    custom.mkdir()
+    return {"invoker": invoker, "companion": companion, "report": report, "custom": custom}
+
+
+def native_hook_transport_overrides():
+    """Other transport overrides stay unproved even alongside Git's native helper path."""
+    return [("ssh", "env", key, "synthetic-ssh")
+            for key in ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT")] + [
+        ("ssh", "config", "core.sshCommand", "synthetic-ssh"),
+        ("ssh", "config", "ssh.variant", "synthetic-ssh"),
+        ("https", "env", "GIT_SSL_NO_VERIFY", "1"),
+        ("https", "env", "CURL_CA_BUNDLE", "synthetic-ca.pem"),
+        ("https", "config", "http.sslVerify", "false"),
+    ]
+
+
 def git_ssh_launcher_cases():
     """Generate the supported Git for Windows launcher locations."""
     return ["cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe", "mingw32/bin/git.exe",

@@ -1059,6 +1059,62 @@ def _git_bundled_ca(value, env):
     return True
 
 
+def _git_exec_path_problem(env):
+    """Admit only the selected Git's native helper path, without changing caller state.
+
+    Git injects this variable into hooks. Probe its default with the override absent
+    in the child environment. Executable integrity remains a prerequisite of invoking
+    Git; matching directory names does not authenticate an arbitrary PATH executable.
+    """
+    import shutil
+    import stat
+    from pathlib import Path
+
+    selected = [value for key, value in env.items() if key.upper() == "GIT_EXEC_PATH"]
+    if not selected:
+        return None
+    problem = "unproved Git helper path"
+    if len(selected) != 1:
+        return problem
+
+    def canonical_path(value, directory):
+        if not isinstance(value, str) or not value or any(ord(char) < 32 for char in value):
+            return False
+        path = Path(value)
+        if not path.is_absolute() or ".." in path.parts:
+            return False
+        for node in [*reversed(path.parents), path]:
+            info = node.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                return False
+        # Resolve only after inspecting lexical ancestors, including junctions.
+        if os.path.normcase(str(path)) != os.path.normcase(str(path.resolve(strict=True))):
+            return False
+        return stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+
+    try:
+        actual = selected[0]
+        if not canonical_path(actual, directory=True):
+            return problem
+        environment = {key: value for key, value in env.items() if key.upper() != "GIT_EXEC_PATH"}
+        git = shutil.which("git", path=environment.get("PATH", os.defpath))
+        if (not canonical_path(git, directory=False)
+                or Path(git).name.casefold() != ("git.exe" if os.name == "nt" else "git")):
+            return problem
+        result = subprocess.run([git, "--exec-path"], env=environment, capture_output=True,
+                                text=True, encoding="utf-8", timeout=5, **_no_window())
+        lines = result.stdout.splitlines()
+        if result.returncode != 0 or len(lines) != 1 or not canonical_path(lines[0], directory=True):
+            return problem
+        if os.path.normcase(os.path.normpath(actual)) != os.path.normcase(os.path.normpath(lines[0])):
+            return problem
+        if not os.path.samefile(actual, lines[0]):
+            return problem
+    except (OSError, ValueError, TypeError, RuntimeError, subprocess.TimeoutExpired):
+        return problem
+    return None
+
+
 def _https_configuration_problem(config_entries, env):
     """Prove default HTTPS routing and trust under a small static configuration policy.
 
@@ -1071,10 +1127,14 @@ def _https_configuration_problem(config_entries, env):
     bypassed = _no_proxy_exempts_github(env)
     for name in env:
         key = name.casefold()
+        if key == "git_exec_path":
+            if _git_exec_path_problem(env) is not None:
+                return "unproved HTTPS environment override"
+            continue
         if key in _PROXY_ENV and bypassed:
             continue
         if (key in _PROXY_ENV | {"curl_ca_bundle", "ssl_cert_file", "ssl_cert_dir",
-                                 "curl_ssl_backend", "git_exec_path"}
+                                 "curl_ssl_backend"}
                 or key.startswith(("git_ssl_", "git_proxy_ssl_"))
                 or (key.startswith("git_http_") and key not in _HTTPS_PERFORMANCE_ENV)):
             return "unproved HTTPS environment override"
@@ -1142,7 +1202,7 @@ def _companion_visibility_once(root, visibility_map, env):
     if any(key.startswith("remote.") and key.rsplit(".", 1)[-1] in {"vcs", "uploadpack", "receivepack"}
            for key in config):
         return [], ["companion has a custom remote transport command; visibility is UNKNOWN"]
-    ssh_override = (any(name.upper() in {"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_EXEC_PATH"}
+    ssh_override = (any(name.upper() in {"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"}
                         for name in env)
                     or any(name in config for name in ("core.sshcommand", "ssh.variant")))
     ssh_checks = {}
@@ -1163,7 +1223,8 @@ def _companion_visibility_once(root, visibility_map, env):
                         continue
                 if key is not None and ssh_host is not None:
                     if ssh_host not in ssh_checks:
-                        ssh_checks[ssh_host] = ("custom SSH transport override" if ssh_override
+                        ssh_checks[ssh_host] = ("custom SSH transport override"
+                                                if ssh_override or _git_exec_path_problem(env) is not None
                                                 else _ssh_configuration_problem(ssh_host))
                     if ssh_checks[ssh_host] is not None:
                         errors.append("companion SSH destination is UNKNOWN: " + str(ssh_checks[ssh_host]))
