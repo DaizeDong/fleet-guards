@@ -78,6 +78,11 @@ runs:
           echo "::error::the guards submodule has no test_https_transport.py"; exit 1; }
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_https_transport.py" -q
 
+    - name: Storage admission tests (are writes declared and versionable?)
+      shell: bash
+      run: |
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_storage_contract.py" -q
+
     - name: SSH transport tests (is server authentication preserved?)
       shell: bash
       run: |

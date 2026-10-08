@@ -1554,3 +1554,40 @@ def package_api_cases():
         "concurrent_payloads": [bytes([65 + n]) * 10000 for n in range(4)],
         "unsafe_paths": ["../escape", "stream:private", "NUL", "CON.txt", "trailing.", "trailing "],
     }
+
+
+def make_storage_contract_fixture(root, refreshed):
+    """Generate a source contract and a versioned private companion for admission tests."""
+    root = Path(root)
+    configuration = write_git_context_configuration(root)
+    source = GitContextFixture(root / "source", configuration)
+    companion = GitContextFixture(root / "companion", configuration)
+    companion.git("remote", "add", "origin",
+                  "https://github.com/example-owner/synthetic-private.git")
+    (companion.root / ".gitignore").write_text(
+        "cache/*.tmp\nignored-directory/\n", encoding="utf-8")
+    companion.git("add", ".gitignore")
+    companion.git("commit", "-qm", "synthetic storage companion")
+    artifacts = []
+    for identifier, pattern, retention in (
+            ("status", "reports/status.json", "core"),
+            ("cache", "cache/*.tmp", "rebuildable"),
+            ("runs", "data/runs/*/**", "rebuildable"),
+            ("ignored-directory", "ignored-directory/**", "rebuildable")):
+        artifacts.append({
+            "artifact_id": identifier, "path_pattern": pattern,
+            "purpose": "Synthetic admission regression",
+            "schema": "Synthetic byte sequence", "producer": "synthetic-test",
+            "consumer_or_final_deliverable": "Synthetic result assertion",
+            "retention_rule": {"class": retention, "rule": "Until the synthetic test completes"},
+            "rebuild_or_restore": "Regenerate with make_storage_contract_fixture",
+        })
+    contract = {"schema_version": 1, "tool": "synthetic-tool", "artifacts": artifacts}
+    (source.root / "storage.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+    receipt = write_visibility(root / "visibility.json", {
+        "example-owner/synthetic-private": "PRIVATE",
+        "example-owner/synthetic-public": "PUBLIC",
+    }, refreshed)
+    return {"source": source, "companion": companion, "contract": contract,
+            "configuration": configuration, "receipt": receipt}
