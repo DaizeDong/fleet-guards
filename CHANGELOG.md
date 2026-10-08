@@ -29,6 +29,16 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Added
 
+- **Source-owned artifact write admission.** `tools/storage_contract.py` holds
+  the validation and matching primitives shared with Smith and a read-only
+  `authorize_artifact_write` API. It requires a unique declared owner, an exact
+  PRIVATE versioned companion root, safe path topology, and effective ignore
+  checks before a write. Explicit source `persistence: transient` with a concrete
+  reason permits ignored temporary artifacts; rebuildable retention alone does
+  not. Publication routes and source policy are rechecked before returning.
+  The synthetic admission suite runs in the shared CI action. See
+  `docs/STORAGE_CONTRACT.md` for the API and its concurrency boundary.
+
 - **Claude Code transcript shapes in `data_boundary.py`.** Check 4 did not recognise a session
   transcript, so a real conversation committed into a public repository passed. Four shapes now
   cover it: a `<uuid>.jsonl` or `.jsonl.gz` session file (and the `.fork-<uuid>.tmp` staging copy),

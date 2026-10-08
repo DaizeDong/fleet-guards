@@ -166,7 +166,12 @@ if (current.root, current.repositories, current.signature) != (
     raise boundary.GitError("Companion publication state changed before writing")
 ```
 
-A failed proof or metadata read must stop the write. The adapter still owns destination containment, filesystem-alias checks, concurrent-writer handling and atomic writes. Keep the final proof adjacent to the write, and avoid serializing the proof's private context.
+A failed proof or metadata read must stop the write. For source-owned artifact writes,
+use [`authorize_artifact_write`](docs/STORAGE_CONTRACT.md) from
+`tools/storage_contract.py`. It combines the proof above with exact companion-root,
+source separation, path ownership, alias, nested-repository, and versionability
+checks. The adapter still owns concurrent-writer handling and atomic writes.
+Keep admission adjacent to the write, and avoid serializing the proof's private context.
 
 ```
 python tools/data_boundary.py                 # this repo holds no run output
