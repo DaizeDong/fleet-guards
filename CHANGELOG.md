@@ -39,6 +39,17 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Added
 
+- **Automatic synchronization follows private or custom upstreams.** A consumer
+  declares extra upstreams through the new optional `sources` input of
+  `sync-consumer.yml`, each with its gate workflow and branch; the built-in kits
+  stay on `main` with their own gates and cannot be redeclared. Declarations are
+  validated strictly, the `.gitmodules` branch must match, and a notification for
+  an undeclared repository is rejected instead of widening into a full sync. The
+  fetch credential reaches git only through process-scoped environment config.
+  `dispatch-consumers.yml` gains `workflow` and `branch` inputs, and
+  `templates/upstream-notify.yml` shows a synthetic private upstream notifying its
+  consumers. Both updater checkout pins advance to the reviewed commit.
+
 - **Package runtime API 0.2.1.** `fleet_guards.runtime` binds canonical companion
   discovery to an explicit consumer root and exposes current PRIVATE proof and
   artifact admission. Wheels map the existing source modules without a second

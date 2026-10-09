@@ -108,6 +108,7 @@ python guards/tools/test_companion_contract.py
 | `hooks/` | `pre-commit` 与 `pre-push`，消费仓的转发脚本最终 exec 进来的本体。 |
 | `ci/pii-guard/action.yml` | 每个消费仓按本地路径引用的 composite action。 |
 | `templates/fleet-sync.yml` | 消费仓为接入自动同步而拷走的那一个 workflow。 |
+| `templates/upstream-notify.yml` | 自定义上游（包括私有仓）拷走、用来通知自己那批消费仓的 workflow。 |
 | `COMPANION.md` | 公开仓与私有伴生仓之间的契约，由一个测试对着解析器逐条核对。 |
 | `docs/AUTOMATIC_SYNC.md` | 消费仓怎么接入，以及分发路径为什么长这样。 |
 
@@ -118,7 +119,8 @@ python guards/tools/test_companion_contract.py
 
 一个 submodule 钉住一个 commit。消费仓可以用上面的命令手工更新，也可以接入
 [自动同步](docs/AUTOMATIC_SYNC.md)。接入之后，上游检查通过就会发出一个 dispatch 事件，消费仓在自己的
-默认分支上记录一次普通的 gitlink 更新提交。它自己的提交闸门和 CI 照常运行。
+默认分支上记录一次普通的 gitlink 更新提交。它自己的提交闸门和 CI 照常运行。同一条路径也能跟随别的仓库，私有仓
+也行，按声明的分支和检查 workflow 来；见[私有或自定义上游](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams)。
 
 ## 输出示例
 

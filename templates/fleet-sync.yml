@@ -18,5 +18,11 @@ concurrency:
 jobs:
   sync:
     uses: DaizeDong/fleet-guards/.github/workflows/sync-consumer.yml@main
+    # Optional: follow extra upstreams besides the built-in kits, including private ones.
+    # Each key is "owner/repo"; "workflow" is the upstream's gate workflow file and "branch" the
+    # branch it publishes from. The matching .gitmodules entry must name the same branch (a
+    # missing branch means main), and FLEET_SYNC_TOKEN must be able to read the upstream.
+    # with:
+    #   sources: '{"example/upstream": {"workflow": "ci.yml", "branch": "master"}}'
     secrets:
       sync-token: ${{ secrets.FLEET_SYNC_TOKEN }}

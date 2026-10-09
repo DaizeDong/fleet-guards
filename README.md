@@ -125,6 +125,7 @@ Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always us
 | `hooks/` | `pre-commit` and `pre-push`, the bodies the consumer's shims forward into. |
 | `ci/pii-guard/action.yml` | The composite action every consumer references by local path. |
 | `templates/fleet-sync.yml` | The one workflow a consumer copies to enroll in automatic synchronization. |
+| `templates/upstream-notify.yml` | The workflow a custom or private upstream copies to notify its own consumers. |
 | `COMPANION.md` | The contract between a public repository and its private companion, checked against the resolver by a test. |
 | `docs/AUTOMATIC_SYNC.md` | How a consumer enrolls, and why the dispatch path is what it is. |
 
@@ -136,7 +137,9 @@ Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always us
 A submodule pins one commit. Consumers update manually with the commands above, or enroll in
 [automatic synchronization](docs/AUTOMATIC_SYNC.md). Once enrolled, a successful upstream check
 sends a dispatch event and the consumer records a normal gitlink update commit on its default
-branch. Its commit gates and CI still run.
+branch. Its commit gates and CI still run. The same path can follow other repositories, private
+ones included, on a declared branch and gate workflow; see
+[Private or custom upstreams](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams).
 
 ## Example output
 
