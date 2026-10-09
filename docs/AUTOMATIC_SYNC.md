@@ -90,9 +90,12 @@ Actions secret UI or `gh secret set`, never through a public configuration file.
 
 Use `gh secret set FLEET_SYNC_TARGETS --repo example/upstream < private-targets.json`
 from a shell that supports input redirection. Set `FLEET_SYNC_CREDENTIALS` through
-standard input in the same way. The files belong in the private administration
-repository, except credential material, which belongs in a credential store and
-must not be committed even there. Do not print either secret in CI.
+standard input in the same way. Keep the inventory in a private administration
+repository. Credential material belongs in a credential store or a PRIVATE
+administration repository whose policy explicitly permits credential backups.
+Never commit either secret to a public repository or print it in CI. Rotating a
+versioned credential requires revoking or replacing the credential itself; editing
+the current file does not remove it from history.
 
 The dispatcher validates every subscription and credential before sending. It
 sends up to four notifications concurrently, checks HTTP errors, and fails if any

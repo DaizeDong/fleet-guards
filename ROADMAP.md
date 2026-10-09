@@ -17,7 +17,7 @@ which is the single home for that reasoning, and what changed lives in `CHANGELO
   shape of it).
 - The data boundary: every path declared TOOL, FIXTURE or DATA in `.dataclass.json`, with fixtures
   required to be generator reproducible (`tools/data_boundary.py`).
-- The companion resolver: six probe locations in a fixed order, a proof requirement, and a refusal
+- The companion resolver: documented probe locations in a fixed order, a proof requirement, and a refusal
   to resolve a data directory that sits inside the skill's own repository (`tools/datadir.py`).
 - The companion contract, checked against the resolver by construction rather than by reading
   (`COMPANION.md`, `tools/test_companion_contract.py`).
@@ -46,5 +46,7 @@ which is the single home for that reasoning, and what changed lives in `CHANGELO
   ledgers, dated files under output directories, database files and, since 2026-09-27, Claude Code
   session transcripts. Formats outside that list, an image among them, pass a repository whose only
   real output is that format.
-- **A version literal the tests can pin.** This repository declares no version in code, so the one
-  in the badge, this heading and the changelog agree by attention rather than by assertion.
+- **A guard-toolkit version literal the tests can pin.** The toolkit version in
+  the badge, this heading and the changelog is maintained separately from the
+  Python package version in `pyproject.toml`; the package literal does not enforce
+  consistency of the toolkit's prose version.

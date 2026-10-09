@@ -1,6 +1,6 @@
 # fleet-guards
 
-The guard kit for this fleet, in one place, consumed as a git submodule: nine detection rules, a data boundary, and hooks that refuse to run when they are not there.
+Shared publication guards for Git repositories: nine detection rules, a data boundary, and hooks that block when required checks are unavailable. Consumers pin the kit as a Git submodule.
 
 Python consumers can build the [shared filesystem, credential and runtime package](PACKAGE.md).
 Its versioned API and wheel are separate from the Git hook entrypoints.
@@ -17,30 +17,13 @@ Its versioned API and wheel are separate from the Git hook entrypoints.
 
 ## ⭐ Read this first, the design philosophy
 
-Three commitments shape everything here, and they matter more than the rule list.
+The kit combines structural storage rules, identifier scanning and explicit failure reporting.
 
-**A sieve at the exit cannot catch a pipe pointed at it.** `pii_guard` reads what is about to be
-published and flags what smells private. That is the backstop, not the primary control. The 2026-07
-audit found public repositories holding real-run output that the skills themselves had written
-there, every run, by design: a verdict ledger, a purchase record, an activity log. A ticker with an
-entry price carries no address and no phone number, so a content scanner has nothing to smell. The
-primary control is therefore structural: every path belongs to exactly one class declared in
-`.dataclass.json`, and anything a real run produced lives in a private companion repository that is
-physically absent from the public one.
+**Keep real output outside public source.** The 2026-07 audit found that repository-relative output paths placed real run records in public repositories. Records can contain private facts without an email address or phone number, so content scanning alone cannot enforce this boundary. Every path is classified in `.dataclass.json`; real output belongs in a separate PRIVATE companion.
 
-**An allowlist, because a denylist is written by whoever leaks.** A hand listed set of forbidden
-terms only ever blocks what its author already thought of, and a file full of real identifiers is
-itself the document you were trying not to publish. So the scanner flags every real world shaped
-identifier that is not from the declared synthetic namespace, including vendors nobody anticipated.
-It contains no private data and is safe to publish. The private term list stays on one machine and
-never enters a repository.
+**Allow declared synthetic identifiers.** Structural rules flag identifiers outside the synthetic namespace. A private term list supplements those rules for names they cannot infer. The public scanner contains no private identifiers; the private list stays outside public repositories.
 
-**Absent is a failure, not a reason to skip.** Every state where a check could be missing is a
-blocking state: an empty submodule directory, a scanner file that is not there, a `.dataclass.json`
-that was never written, a Git command that failed instead of listing nothing. A step wrapped in
-`if [ -f ... ]` disappears from the report when its file goes missing, and a report with one line
-missing reads exactly like a report where everything passed. Clean and never checked have to be two
-different outputs.
+**Report incomplete checks as failures.** Missing scanners, empty submodules, absent declarations and failed Git reads must block the affected check. Reports distinguish a completed scan with no findings from a scan that never ran.
 
 ## What it is (and isn't)
 
@@ -64,19 +47,9 @@ Nine detection rules, implemented as 38 regexes across five tools. What they act
 Plus 13 filename patterns that recognise real-run output, four false-positive suppressors, and
 twelve pure text helpers that carry no security role at all.
 
-It is **not** a Claude Code skill or plugin, and it ships no `SKILL.md`: nothing here is invoked by
-an agent. It is **not** the style kit. The two gates that were purely style and architecture,
-`dash_guard` and `load_budget`, live in `fleet-style`: they were 17.5% of this repository and none
-of it was about keeping an identifier out of a public history. It is **not** a private repository
-and must never become one: a private submodule breaks CI in every public consumer.
+This repository is a Git/CI toolkit without a Claude Code skill or plugin entrypoint. Style and loading-budget checks belong to `fleet-style`; the original `dash_guard` and `load_budget` split moved 17.5% of this kit into that separate scope. Keep this submodule public so public consumers can fetch it in CI.
 
-Before this repository existed, the kit was copied by hand into every consumer: 17 files, 7,643
-lines, times 22 repos, about 191,000 lines on disk. The copies were byte identical and one installer
-could resync them all, so duplication was not the cost. The cost was that the installer worked from
-a hand written list, and a repository missing from that list got, in the installer's own words, "the
-appearance of a gate and none of the maintenance". Two public repositories sat on a fail open
-pre-push hook for exactly that reason, found on 2026-08-31. A submodule replaces the list with a
-pointer that lives in the consuming repository itself.
+The earlier deployment copied 17 files and 7,643 lines per kit across 22 consumers; the historical inventory reported about 191,000 lines on disk. Its installer depended on a manually maintained consumer list. The 2026-08-31 audit found two omitted public repositories with fail-open pre-push hooks. Each consumer now records its dependency as a submodule pointer, making that dependency part of its own source history.
 
 ## Install
 
@@ -110,16 +83,14 @@ submodule path. A missing checkout or resolver blocks the audit. For a standalon
 run that repository's own `tools/data_boundary.py`; an external checker will not import a loose
 consumer copy. `--companion-dir` remains available when explicitly selecting the DATA store.
 
-USE THE HTTPS URL, not an ssh host alias. `.gitmodules` is committed and shared, so the url has to
-resolve for everyone who clones, including a CI runner. The first migration used a local ssh alias
-and all three workflows failed immediately with "Could not read from remote repository".
+Use the HTTPS URL in `.gitmodules` so other machines and CI can resolve it. A local SSH host alias caused all three workflows in the first migration to fail with "Could not read from remote repository".
 
 Clone with `--recursive`, or run `git submodule update --init` afterwards. CI must set
 `submodules: true` on `actions/checkout`.
 
 ## Quick start
 
-A consumer's whole workflow is a checkout, a Python, and one line:
+Add the composite action after checkout and Python setup:
 
 ```yaml
       - uses: actions/checkout@v4
@@ -137,59 +108,16 @@ python guards/tools/publication_guard.py ci
 python guards/tools/test_companion_contract.py
 ```
 
-The normal hooks and composite CI action use `publication_guard.py`. A fresh proof must identify
-every stored and effective fetch/push destination as PRIVATE before private content is permitted.
-An explicit push URL must also belong to the proven configured push routes. Local hooks use the
-installed visibility receipt; GitHub Actions obtains current repository metadata from the canonical
-GitHub API using its job token. Missing evidence retains the full public checks.
-The metadata client rejects custom CA, proxy and TLS key-log environment settings before any
-credential-bearing request. It verifies TLS with default trust, forbids redirects, and requires
-the response URL and repository identity to match the requested canonical API endpoint.
+Normal hooks and CI apply the [publication policy](docs/PUBLICATION_POLICY.md). Current evidence must prove every stored and effective fetch/push destination PRIVATE before private content is admitted. Missing evidence retains full public checks. Manifest, schema, fixture, path and identity requirements still apply to PRIVATE repositories.
 
-For verified PRIVATE repositories, declared DATA and private references are permitted. Manifest,
-path, schema, fixture, run-shape and sealed-path checks still run, and the pre-commit identity
-assertion remains mandatory. The output names the proven repositories and states that public-content
-scanning is out of scope. Public and unknown repositories receive the full PII and data-boundary
-checks. Explicit `pii_guard.py --tree --history` and `data_boundary.py` invocations remain public-policy
-diagnostics regardless of visibility; private-only content can produce findings in those diagnostics.
-
-The public TOOL check rejects declared DATA and sealed paths that physically exist, including ignored
-files and empty declared directories. Keep public tool DATA in a separate private companion repository.
-
-Staged and range scans compare decoded Git blobs, so UTF-16 editor files receive the same
-addition-only checks as UTF-8. Unchanged and removed lines stay outside those incremental scans;
-merge additions must be new against every parent. Range scans also check newly introduced paths,
-including rename destinations and gitlinks. Tree scans exclude indexed submodules from their parent;
-scan each child repository separately to check its content.
-All Git discovery and object reads use original objects, including commit and tag metadata.
-Replacement objects cannot conceal reachable history. Hook repository selectors and the selected
-index remain in effect for scans of the repository being checked.
-
-Format-2 private token policies require an integer `count` matching all loaded entries, including the canary. Legacy policies remain readable and report that completeness is unattested. The DATA resolver follows the physical installation when imported through a directory alias and refuses authorization if filesystem resolution fails. Visibility remains a separate companion audit.
-
-Eligible historical blobs above the 8 MiB scan limit make the history scan incomplete. The API raises `ScanIncompleteError`; the CLI prints `SCAN INCOMPLETE` and exits 2, which blocks publication. A size limit cannot establish that the skipped content is safe. Existing exclusions for known binary extensions remain separate.
-
-When another owner's private repository has exactly this repository's name or a documented companion name, the cross-repository policy retains that foreign `owner/name` as a qualified token. Bare own-companion names and explicit own-owner references do not identify the foreign repository. Explicit foreign references retain their original severity, unrelated private names retain bare-name enforcement, and independent secret denylist entries still apply.
-
-Audit that companion with:
-
-```bash
-python guards/tools/data_boundary.py --companion-dir ../example-skill-config --visibility-map /path/to/visibility.json
-```
-
-The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed` timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL rewrites and additional push URLs are checked. The audit prints the verified repository names and allows versioned DATA there. SSH aliases require an explicit `HostName github.com` in every plausible configuration chain. Missing or stale evidence, public destinations, unrecognized clients, and unproved routing or trust settings block admission. See [the transport contract](COMPANION.md#verifying-a-companion) for the supported SSH and HTTPS configurations. This check uses the local receipt and does not make network calls.
-
-Companion discovery starts at the physical DATA destination, independently of the invoking hook's
-repository and index. Its stored repository configuration and its effective process configuration
-must both identify only PRIVATE destinations. A temporary URL rewrite cannot turn a PUBLIC store
-into an authorized companion. Linked worktrees remain supported.
+Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always use public policy. For companion admission, including receipt freshness and supported transports, follow [COMPANION.md](COMPANION.md#verifying-a-companion).
 
 ## What is in here
 
 | Path | What it is |
 | --- | --- |
 | `tools/pii_guard.py` | The scanner. Allowlist based, structural, runs over the working tree and the full history. |
-| `tools/data_boundary.py` | The primary control. Asks whether this repository is an uninitialized tool or somebody's life. |
+| `tools/data_boundary.py` | Checks declared classes, fixtures and real-output boundaries. |
 | `tools/publication_guard.py` | Applies proven repository visibility to normal hook and CI policy. |
 | `tools/datadir.py` | The resolver. Decides where real-run output goes, which is always outside the repository. |
 | `tools/fleet_sync.py` | Dispatches verified upstream updates and advances consumer gitlinks. |
@@ -221,8 +149,7 @@ data_boundary: clean (0 DATA + 0 sealed paths not tracked, 0 FIXTUREs generator-
 28 tracked files carry no real-run shape)
 ```
 
-Both print a count, and the count is the point. "Clean" with nothing scanned is the failure this kit
-spends most of its lines preventing.
+Reports include examined and excluded counts so readers can distinguish coverage from an empty or incomplete scan.
 
 ## The failure mode to know about
 
@@ -250,8 +177,7 @@ same test holds every copy identical.
 
 ## Limitations
 
-**Four things behave differently in a repository that carries this submodule.** Measured on a real
-consumer, not reasoned about, and only one of them will actually stop you.
+The following compatibility observations came from a consumer checkout. They describe that validation scope, not every possible consumer configuration.
 
 The pre-commit framework refuses to install: `pre-commit install` prints "Cowardly refusing to
 install hooks with `core.hooksPath` set" and hints that you unset it. Following that hint leaves a
@@ -259,24 +185,15 @@ working formatter and no gate. The stub in `.githooks/` calls `pre-commit run` i
 and the binary are both present, so both run and the guard stays last: a formatter that rewrites
 files cannot slip the change past the scan.
 
-A linter walks in here. This kit is clean under ruff's default rules. Under an opinionated set it is
-not, and cannot be: 155 of the findings at that level are "rewrite %-formatting as f-strings" across
-a scanner where that churn buys no correctness. Exclude the submodules with
-`extend-exclude = ["guards", "style"]`.
+The kit passed ruff's default rules in that check. A stricter configuration reported 155 requests to replace %-formatting with f-strings. Consumers applying their own lint policy can exclude submodules with `extend-exclude = ["guards", "style"]`.
 
 A module of yours with the same name as one here wins. With the repository's own directory first on
 `sys.path`, `import datadir` resolves to the repository's, not the kit's. A root `conftest.py` also
 wins over the one here. The reverse only happens if you put the kit's path first, which is a choice.
 
-Everything else was checked and is a non-event: a new top-level package and its tests are collected
-normally, `find_packages()` returns nothing from the submodules, `pytest` at the root does not pick
-up the kit's suite (`pytest guards/tools/` still does, deliberately), a `pytest.ini` with `testpaths`
-changes nothing, and the submodules never show as dirty after a test run.
+In that consumer check, new top-level packages and tests were collected normally, `find_packages()` excluded the submodules, and root `pytest` excluded the kit suite while explicit `pytest guards/tools/` collected it. A `pytest.ini` with `testpaths` did not change those results, and tests left the submodules clean.
 
-**What the kit cannot close.** The boundary stops an agent from copying a real file, because no real
-file is within reach. The structural rules recognise shapes and the private list recognises names.
-None of the three recognises prose that leaks a private fact without naming an identifier. That one
-has no mechanism behind it, only the rule never to use a real example.
+**Private facts in prose remain a gap.** Keeping DATA outside public source prevents accidental inclusion of those files. Structural rules recognize identifiers and the private list recognizes configured names, but neither establishes that prose contains no private facts. Public examples must use synthetic data.
 
 ## Languages
 
