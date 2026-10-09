@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: DaizeDong/fleet-guards
-          ref: a5a932b99640db43c814388b86bd9e932aa1f59b
+          ref: 27110e85f2b84ea42ba0dfcde1f91549901856e5
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
