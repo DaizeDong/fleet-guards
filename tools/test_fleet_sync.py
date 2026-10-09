@@ -301,7 +301,7 @@ def test_update_cli_passes_only_explicit_refresh_opt_in(visibility_fixture, monk
     monkeypatch.setattr(sys, "argv", ["fleet_sync.py", "update"] + (["--refresh-visibility"] if opt_in else []))
     monkeypatch.setattr(sync, "update_consumer", lambda *args, **kwargs: observed.append(kwargs))
     sync.main()
-    assert observed == [{"refresh_visibility": opt_in}]
+    assert observed == [{"refresh_visibility": opt_in, "sources": {}}]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Hosted receipt refresh requires POSIX permissions")
@@ -316,3 +316,327 @@ def test_unproved_route_fails_before_metadata_or_receipt(visibility_fixture, vis
         refresh(fixture)
     assert not fixture["receipt"].exists()
     assert not visibility_api[0]
+
+
+# ------------------------------------------------- private or custom upstreams (synthetic names only)
+DECLARED = '{"example/upstream": {"workflow": "ci.yml", "branch": "master"}}'
+SYNTHETIC_TOKEN = "synthetic-upstream-token-0123456789"
+
+
+def test_declared_upstream_is_accepted_and_resolved_case_insensitively():
+    sync = module()
+    sources = sync.parse_sources(DECLARED)
+    assert sources == {"example/upstream": {"workflow": "ci.yml", "branch": "master"}}
+    assert sync.resolve_source("Example/Upstream", sources) == (
+        "example/upstream", {"workflow": "ci.yml", "branch": "master"})
+    assert sync.parse_sources("") == {} and sync.parse_sources("   ") == {}
+
+
+@pytest.mark.parametrize("value", [
+    "{",                                                                  # malformed JSON
+    "[]",                                                                 # not an object
+    '"example/upstream"',
+    '{"example/upstream": {"workflow": "ci.yml"}}',                       # missing branch
+    '{"example/upstream": {"workflow": "ci.yml", "branch": "main", "token": "x"}}',  # unknown key
+    '{"example/upstream": ["ci.yml", "main"]}',
+    '{"example/upstream": {"workflow": ".github/workflows/ci.yml", "branch": "main"}}',  # a path
+    '{"example/upstream": {"workflow": "ci.txt", "branch": "main"}}',
+    '{"example/upstream": {"workflow": "ci.yml", "branch": "a..b"}}',
+    '{"example/upstream": {"workflow": "ci.yml", "branch": "-main"}}',
+    '{"example/upstream": {"workflow": "ci.yml", "branch": "main.lock"}}',
+    '{"example/upstream": {"workflow": "ci.yml", "branch": ""}}',
+    '{"example/upstream": {"workflow": "ci.yml", "branch": 1}}',
+    '{"https://github.com/example/upstream": {"workflow": "ci.yml", "branch": "main"}}',
+    '{"example/upstream.git": {"workflow": "ci.yml", "branch": "main"}}',
+    '{"example/..": {"workflow": "ci.yml", "branch": "main"}}',
+    '{"example/upstream": {"workflow": "ci.yml", "branch": "main"},'
+    ' "Example/Upstream": {"workflow": "ci.yml", "branch": "main"}}',   # case-folded duplicate
+])
+def test_malformed_declarations_are_rejected(value):
+    with pytest.raises(ValueError):
+        module().parse_sources(value)
+
+
+@pytest.mark.parametrize("spec", [
+    {"workflow": "other.yml", "branch": "main"},
+    {"workflow": "pii-guard.yml", "branch": "develop"},
+])
+def test_builtin_kit_cannot_be_shadowed_by_a_declaration(spec):
+    sync = module()
+    with pytest.raises(ValueError, match="built-in"):
+        sync.parse_sources(json.dumps({"daizedong/FLEET-GUARDS": spec}))
+    with pytest.raises(ValueError, match="built-in"):
+        sync.verified_tip("DaizeDong/fleet-guards", "", SYNTHETIC_TOKEN, spec)
+
+
+def test_restating_a_builtin_with_its_own_settings_is_harmless():
+    sync = module()
+    assert sync.parse_sources('{"DaizeDong/fleet-style": {"workflow": "style.yml", "branch": "main"}}') == {}
+
+
+def test_declared_source_urls_match_https_and_ssh_forms():
+    sync = module()
+    sources = sync.parse_sources(DECLARED)
+    for url in ("https://github.com/example/upstream.git", "https://github.com/Example/Upstream",
+                "git@github.com:example/upstream.git"):
+        assert sync.source_from_url(url, sources) == "example/upstream"
+    assert sync.source_from_url("https://github.com/example/upstream.git") is None
+    assert sync.source_from_url("https://example.com/example/upstream.git", sources) is None
+    assert sync.source_from_url("https://github.com/example/upstream-extra.git", sources) is None
+
+
+GITMODULES_DECLARED = '''[submodule "upstream"]
+path = vendor/upstream
+url = https://github.com/example/upstream.git
+branch = %s
+[submodule "guards"]
+path = guards
+url = https://github.com/DaizeDong/fleet-guards.git
+'''
+
+
+def test_declared_upstream_is_selected_only_on_its_declared_branch():
+    sync = module()
+    sources = sync.parse_sources(DECLARED)
+    assert sync.select_modules(GITMODULES_DECLARED % "master", "example/upstream", sources) == [
+        {"path": "vendor/upstream", "source": "example/upstream", "branch": "master"}]
+    assert [m["source"] for m in sync.select_modules(GITMODULES_DECLARED % "master", "all", sources)] == [
+        "example/upstream", "DaizeDong/fleet-guards"]
+    # Undeclared, the same .gitmodules entry is ignored rather than followed.
+    assert sync.select_modules(GITMODULES_DECLARED % "master", "example/upstream") == []
+
+
+@pytest.mark.parametrize("contents", [
+    GITMODULES_DECLARED % "main",
+    GITMODULES_DECLARED.replace("branch = %s\n", ""),        # missing branch means main
+])
+def test_declared_upstream_with_mismatched_gitmodules_branch_is_rejected(contents):
+    sync = module()
+    with pytest.raises(ValueError, match="branch"):
+        sync.select_modules(contents, "all", sync.parse_sources(DECLARED))
+
+
+def test_builtin_kit_still_requires_main():
+    sync = module()
+    contents = '[submodule "g"]\npath = guards\nurl = https://github.com/DaizeDong/fleet-guards.git\nbranch = master\n'
+    with pytest.raises(ValueError):
+        sync.select_modules(contents, "all", sync.parse_sources(DECLARED))
+
+
+def green_api(calls, tip):
+    def api(path, token, **kwargs):
+        calls.append(path)
+        if "/actions/workflows/" in path:
+            return {"workflow_runs": [{"head_sha": tip, "event": "push", "status": "completed",
+                                       "conclusion": "success"}]}
+        return {"sha": tip}
+    return api
+
+
+def test_verified_tip_uses_declared_branch_and_workflow(monkeypatch):
+    sync = module()
+    calls = []
+    tip = "c" * 40
+    monkeypatch.setattr(sync, "api", green_api(calls, tip))
+    spec = sync.parse_sources(DECLARED)["example/upstream"]
+    assert sync.verified_tip("example/upstream", tip, SYNTHETIC_TOKEN, spec) == tip
+    assert calls[0] == "repos/example/upstream/commits/master"
+    assert calls[1].startswith("repos/example/upstream/actions/workflows/ci.yml/runs?")
+    assert "branch=master" in calls[1] and "event=push" in calls[1]
+
+
+def test_verified_tip_requires_a_declaration_for_a_non_builtin(monkeypatch):
+    sync = module()
+    calls = []
+    monkeypatch.setattr(sync, "api", green_api(calls, "c" * 40))
+    with pytest.raises(ValueError):
+        sync.verified_tip("example/upstream", "", SYNTHETIC_TOKEN)
+    assert not calls
+
+
+def test_declared_upstream_obsolete_notification_is_a_noop(monkeypatch):
+    sync = module()
+    monkeypatch.setattr(sync, "api", lambda *a, **k: {"sha": "b" * 40})
+    spec = sync.parse_sources(DECLARED)["example/upstream"]
+    assert sync.verified_tip("example/upstream", "a" * 40, SYNTHETIC_TOKEN, spec) is None
+
+
+def test_dispatch_source_resolution():
+    sync = module()
+    assert sync.dispatch_source("DaizeDong/fleet-style", "", "") == (
+        "DaizeDong/fleet-style", {"workflow": "style.yml", "branch": "main"})
+    assert sync.dispatch_source("example/upstream", "ci.yml", "master") == (
+        "example/upstream", {"workflow": "ci.yml", "branch": "master"})
+    for args in (("example/upstream", "", ""), ("example/upstream", "ci.yml", ""),
+                 ("example/upstream", "", "master"), ("DaizeDong/fleet-guards", "other.yml", "main"),
+                 ("example/upstream", "../ci.yml", "master")):
+        with pytest.raises(ValueError):
+            sync.dispatch_source(*args)
+
+
+def test_dispatch_cli_verifies_a_custom_upstream_on_its_declared_gate(monkeypatch):
+    sync = module()
+    calls, sent = [], []
+    tip = "d" * 40
+    monkeypatch.setattr(sync, "api", green_api(calls, tip))
+    monkeypatch.setattr(sync, "dispatch_targets", lambda *a: sent.append(a))
+    monkeypatch.setattr(sys, "argv", ["fleet_sync.py", "dispatch"])
+    for key, value in (("GH_TOKEN", SYNTHETIC_TOKEN), ("SOURCE_REPOSITORY", "example/upstream"),
+                       ("SOURCE_SHA", tip), ("FLEET_SYNC_UPSTREAM_WORKFLOW", "ci.yml"),
+                       ("FLEET_SYNC_UPSTREAM_BRANCH", "master"),
+                       ("FLEET_SYNC_TARGETS", '[{"repository":"example/consumer","credential":"primary"}]'),
+                       ("FLEET_SYNC_CREDENTIALS", '{"primary":"synthetic-token"}')):
+        monkeypatch.setenv(key, value)
+    sync.main()
+    assert calls[0] == "repos/example/upstream/commits/master"
+    assert "/workflows/ci.yml/" in calls[1]
+    assert sent and sent[0][2:] == ("example/upstream", tip)
+
+
+@pytest.mark.parametrize("source", ["", "all"])
+def test_dispatch_event_without_a_named_upstream_is_not_a_full_sync(monkeypatch, source):
+    sync = module()
+    observed = []
+    monkeypatch.setattr(sync, "update_consumer", lambda *a, **k: observed.append(a))
+    monkeypatch.setattr(sys, "argv", ["fleet_sync.py", "update"])
+    monkeypatch.setenv("GH_TOKEN", SYNTHETIC_TOKEN)
+    monkeypatch.setenv("SOURCE_REPOSITORY", source)
+    monkeypatch.setenv("FLEET_SYNC_EVENT", "repository_dispatch")
+    with pytest.raises(ValueError):
+        sync.main()
+    assert not observed
+
+
+def test_scheduled_run_without_payload_still_reconciles_all(monkeypatch):
+    sync = module()
+    observed = []
+    monkeypatch.setattr(sync, "update_consumer", lambda *a, **k: observed.append((a, k)))
+    monkeypatch.setattr(sys, "argv", ["fleet_sync.py", "update"])
+    monkeypatch.setenv("GH_TOKEN", SYNTHETIC_TOKEN)
+    monkeypatch.setenv("SOURCE_REPOSITORY", "")
+    monkeypatch.setenv("FLEET_SYNC_EVENT", "schedule")
+    monkeypatch.setenv("FLEET_SYNC_SOURCES", DECLARED)
+    sync.main()
+    assert observed[0][0][0] == "all"
+    assert observed[0][1]["sources"] == {"example/upstream": {"workflow": "ci.yml", "branch": "master"}}
+
+
+def test_update_cli_rejects_malformed_declaration_before_any_work(monkeypatch):
+    sync = module()
+    observed = []
+    monkeypatch.setattr(sync, "update_consumer", lambda *a, **k: observed.append(a))
+    monkeypatch.setattr(sys, "argv", ["fleet_sync.py", "update"])
+    monkeypatch.setenv("GH_TOKEN", SYNTHETIC_TOKEN)
+    monkeypatch.setenv("FLEET_SYNC_SOURCES", "{not json")
+    with pytest.raises(ValueError, match="JSON"):
+        sync.main()
+    assert not observed
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.fixture
+def recorded_consumer(tmp_path, monkeypatch):
+    """A consumer whose git and GitHub API are recorded; stops right after the upstream fetch."""
+    sync = module()
+    (tmp_path / ".gitmodules").write_text(GITMODULES_DECLARED % "master", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    old, new = "a" * 40, "c" * 40
+    calls = []
+    api_calls = []
+    monkeypatch.setattr(sync, "api", green_api(api_calls, new))
+
+    def run(argv, **kwargs):
+        calls.append((list(argv), kwargs.get("env")))
+        if argv[1:3] == ["status", "--porcelain"]:
+            out = ""
+        elif argv[1:3] == ["ls-files", "--stage"]:
+            out = "160000 %s 0\t%s\n" % (old, argv[-1])
+        elif "merge-base" in argv:
+            raise _Stop()
+        else:
+            out = ""
+        return subprocess.CompletedProcess(argv, 0, out, None)
+
+    monkeypatch.setattr(sync.subprocess, "run", run)
+    return sync, calls, api_calls
+
+
+def test_declared_master_upstream_is_fetched_from_refs_heads_master(recorded_consumer, capsys):
+    sync, calls, api_calls = recorded_consumer
+    with pytest.raises(_Stop):
+        sync.update_consumer("example/upstream", "", SYNTHETIC_TOKEN,
+                             sources=sync.parse_sources(DECLARED))
+    fetch = [argv for argv, _env in calls if "fetch" in argv]
+    assert fetch == [["git", "-C", "vendor/upstream", "fetch", "https://github.com/example/upstream.git",
+                      "refs/heads/master"]]
+    assert api_calls[0] == "repos/example/upstream/commits/master"
+    # The only fleet-guards module is never touched by an example/upstream notification.
+    assert not any("guards" in argv for argv, _env in calls)
+    capsys.readouterr()
+
+
+def test_upstream_credential_never_reaches_argv_url_or_output(recorded_consumer, capsys):
+    import base64
+    sync, calls, _api_calls = recorded_consumer
+    with pytest.raises(_Stop):
+        sync.update_consumer("all", "", SYNTHETIC_TOKEN, sources=sync.parse_sources(DECLARED))
+    encoded = base64.b64encode(("x-access-token:" + SYNTHETIC_TOKEN).encode()).decode()
+    out = capsys.readouterr()
+    for argv, _env in calls:
+        assert not any(SYNTHETIC_TOKEN in arg or encoded in arg for arg in argv)
+    assert SYNTHETIC_TOKEN not in out.out + out.err and encoded not in out.out + out.err
+    networked = [env for argv, env in calls if "fetch" in argv or "submodule" in argv]
+    assert len(networked) == 2
+    for env in networked:
+        assert SYNTHETIC_TOKEN not in json.dumps(env)        # only the header form, only in env
+        count = int(env["GIT_CONFIG_COUNT"])
+        pairs = [(env["GIT_CONFIG_KEY_%d" % i], env["GIT_CONFIG_VALUE_%d" % i]) for i in range(count)]
+        assert pairs[0] == ("http.https://github.com/.extraheader", "")   # resets persisted headers
+        assert pairs[1] == ("http.https://github.com/.extraheader", "AUTHORIZATION: basic " + encoded)
+    # Local, non-network commands carry no credential at all.
+    assert all(env is None for argv, env in calls if "fetch" not in argv and "submodule" not in argv)
+
+
+def test_failed_fetch_error_text_does_not_contain_the_credential(recorded_consumer, monkeypatch):
+    sync, calls, _api_calls = recorded_consumer
+
+    def failing(argv, **kwargs):
+        if "fetch" in argv:
+            raise subprocess.CalledProcessError(128, argv)
+        if argv[1:3] == ["ls-files", "--stage"]:
+            return subprocess.CompletedProcess(argv, 0, "160000 %s 0\t%s\n" % ("a" * 40, argv[-1]), None)
+        return subprocess.CompletedProcess(argv, 0, "", None)
+
+    monkeypatch.setattr(sync.subprocess, "run", failing)
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        sync.update_consumer("example/upstream", "", SYNTHETIC_TOKEN, sources=sync.parse_sources(DECLARED))
+    assert SYNTHETIC_TOKEN not in str(error.value)
+    assert "x-access-token" not in str(error.value)
+
+
+def test_unknown_payload_source_is_rejected_before_any_git_or_api(recorded_consumer):
+    sync, calls, api_calls = recorded_consumer
+    with pytest.raises(ValueError, match="Unknown upstream"):
+        sync.update_consumer("example/undeclared", "", SYNTHETIC_TOKEN, sources=sync.parse_sources(DECLARED))
+    assert not calls and not api_calls
+
+
+def test_auth_env_appends_after_existing_entries_and_persists_nothing(tmp_path):
+    sync = module()
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, **_no_window())
+    base = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.abbrev", GIT_CONFIG_VALUE_0="12")
+    env = sync.github_auth_env(SYNTHETIC_TOKEN, base)
+    assert env["GIT_CONFIG_KEY_0"] == "core.abbrev" and env["GIT_CONFIG_COUNT"] == "4"
+    shown = subprocess.run(["git", "-C", str(tmp_path), "config", "--show-origin", "--get-all",
+                            "http.https://github.com/.extraheader"], check=True, text=True,
+                           stdout=subprocess.PIPE, **_no_window(env=env)).stdout
+    assert "command line:" in shown and "AUTHORIZATION: basic" in shown
+    assert "AUTHORIZATION" not in (tmp_path / ".git" / "config").read_text(encoding="utf-8")
+    for bad in ("", "   ", None):
+        with pytest.raises(RuntimeError):
+            sync.github_auth_env(bad, base)

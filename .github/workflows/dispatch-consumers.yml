@@ -2,6 +2,21 @@ name: Dispatch fleet consumers
 
 on:
   workflow_call:
+    inputs:
+      workflow:
+        description: >-
+          Gate workflow file name of a custom upstream, for example ci.yml. Leave
+          empty for the built-in kits, which always use their own gate on main.
+        type: string
+        required: false
+        default: ''
+      branch:
+        description: >-
+          Branch a custom upstream publishes from, for example master. Required
+          together with workflow; leave both empty for the built-in kits.
+        type: string
+        required: false
+        default: ''
     secrets:
       targets:
         required: true
@@ -32,4 +47,6 @@ jobs:
           SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           FLEET_SYNC_TARGETS: ${{ secrets.targets }}
           FLEET_SYNC_CREDENTIALS: ${{ secrets.credentials }}
+          FLEET_SYNC_UPSTREAM_WORKFLOW: ${{ inputs.workflow }}
+          FLEET_SYNC_UPSTREAM_BRANCH: ${{ inputs.branch }}
         run: python tools/fleet_sync.py dispatch

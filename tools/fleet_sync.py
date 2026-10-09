@@ -1,5 +1,6 @@
 """Dispatch verified upstream updates and advance consumer gitlinks."""
 import argparse
+import base64
 import configparser
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
@@ -12,7 +13,7 @@ import stat
 import subprocess
 import sys
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -63,10 +64,103 @@ def _no_window(**kwargs):
     return kwargs
 
 
+# Built-in kits: always followed on main through their own gate workflow. A consumer declaration
+# cannot replace or shadow these settings.
 SOURCES = {
     "DaizeDong/fleet-guards": "pii-guard.yml",
     "DaizeDong/fleet-style": "style.yml",
 }
+BUILTIN_BRANCH = "main"
+MAX_DECLARED_SOURCES = 32
+
+_REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}")
+_WORKFLOW = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\.ya?ml")
+_BRANCH_PART = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
+_BRANCH = re.compile(_BRANCH_PART + r"(?:/" + _BRANCH_PART + r")*")
+
+
+def valid_repository(name):
+    return (isinstance(name, str) and bool(_REPOSITORY.fullmatch(name))
+            and name.split("/")[1] not in (".", "..") and not name.lower().endswith(".git"))
+
+
+def valid_workflow(name):
+    return isinstance(name, str) and bool(_WORKFLOW.fullmatch(name))
+
+
+def valid_branch(name):
+    """A conservative subset of git-check-ref-format for a branch name."""
+    return (isinstance(name, str) and 0 < len(name) <= 200 and bool(_BRANCH.fullmatch(name))
+            and ".." not in name and name != "HEAD" and not name.endswith(".")
+            and not any(part.endswith(".lock") for part in name.split("/")))
+
+
+def builtin_name(source):
+    """Canonical built-in name for a case-insensitive match, else None."""
+    for name in SOURCES:
+        if isinstance(source, str) and source.lower() == name.lower():
+            return name
+    return None
+
+
+def builtin_spec(name):
+    return {"workflow": SOURCES[name], "branch": BUILTIN_BRANCH}
+
+
+def _reject_duplicate_keys(pairs):
+    seen = set()
+    for key, _value in pairs:
+        folded = key.lower() if isinstance(key, str) else key
+        if folded in seen:
+            raise ValueError("Duplicate upstream declaration")
+        seen.add(folded)
+    return dict(pairs)
+
+
+def parse_sources(value):
+    """Validate consumer-declared upstreams: {"owner/repo": {"workflow": "x.yml", "branch": "b"}}.
+
+    Returns only the non-built-in declarations. Restating a built-in kit with its own settings is
+    accepted and ignored; declaring it with any other workflow or branch is an error.
+    """
+    if value is None or not value.strip():
+        return {}
+    try:
+        data = json.loads(value, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError:
+        raise ValueError("FLEET_SYNC_SOURCES is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError("FLEET_SYNC_SOURCES must be a JSON object")
+    if len(data) > MAX_DECLARED_SOURCES:
+        raise ValueError("Too many declared upstreams")
+    declared = {}
+    for name, spec in data.items():
+        if not valid_repository(name):
+            raise ValueError("Invalid declared upstream repository")
+        if not isinstance(spec, dict) or set(spec) != {"workflow", "branch"}:
+            raise ValueError("A declared upstream needs exactly the fields workflow and branch")
+        if not valid_workflow(spec["workflow"]):
+            raise ValueError("Invalid declared upstream workflow file name")
+        if not valid_branch(spec["branch"]):
+            raise ValueError("Invalid declared upstream branch")
+        builtin = builtin_name(name)
+        if builtin:
+            if spec != builtin_spec(builtin):
+                raise ValueError("A built-in kit cannot be redeclared with other settings")
+            continue
+        declared[name] = {"workflow": spec["workflow"], "branch": spec["branch"]}
+    return declared
+
+
+def resolve_source(source, sources=None):
+    """Return (canonical name, spec) for a built-in or declared upstream; reject anything else."""
+    builtin = builtin_name(source)
+    if builtin:
+        return builtin, builtin_spec(builtin)
+    for name, spec in (sources or {}).items():
+        if isinstance(source, str) and source.lower() == name.lower():
+            return name, spec
+    raise ValueError("Unknown upstream repository")
 
 
 def api(path, token, *, body=None):
@@ -87,8 +181,8 @@ def api(path, token, *, body=None):
         raise RuntimeError("GitHub API returned HTTP %s" % exc.code) from None
 
 
-def source_from_url(url):
-    for source in SOURCES:
+def source_from_url(url, sources=None):
+    for source in (*SOURCES, *(sources or {})):
         if url.lower().removesuffix(".git") in (
             "https://github.com/" + source.lower(),
             "git@github.com:" + source.lower(),
@@ -105,17 +199,20 @@ def validate_path(path):
     return str(PurePosixPath(path))
 
 
-def select_modules(contents, source):
+def select_modules(contents, source, sources=None):
     config = configparser.ConfigParser(interpolation=None)
     config.read_string(contents)
     selected = []
     for section in config.sections():
         values = config[section]
-        upstream = source_from_url(values.get("url", ""))
+        upstream = source_from_url(values.get("url", ""), sources)
         if upstream and source in ("all", upstream):
+            expected = resolve_source(upstream, sources)[1]["branch"]
+            # A missing branch means main, so an upstream tracked on another branch must say so.
             branch = values.get("branch", "main")
-            if branch != "main":
-                raise ValueError("Automatic synchronization requires the upstream main branch")
+            if branch != expected:
+                raise ValueError("A submodule's .gitmodules branch does not match its upstream's "
+                                 "declared branch (built-in kits require main)")
             selected.append({"path": validate_path(values["path"]),
                              "source": upstream, "branch": branch})
     return selected
@@ -148,17 +245,31 @@ def successful_run(response, sha):
     return False
 
 
-def verified_tip(source, expected_sha, token):
-    if source not in SOURCES:
-        raise ValueError("Unknown upstream repository")
+def verified_tip(source, expected_sha, token, spec=None):
+    """Return the declared branch tip if its latest push run of the gate workflow succeeded.
+
+    spec defaults to the built-in kit's settings; a built-in kit never accepts other settings.
+    """
+    builtin = source in SOURCES
+    if spec is None:
+        if not builtin:
+            raise ValueError("Unknown upstream repository")
+        spec = builtin_spec(source)
+    elif builtin and spec != builtin_spec(source):
+        raise ValueError("A built-in kit cannot be redeclared with other settings")
+    if (not valid_repository(source) or not isinstance(spec, dict)
+            or set(spec) != {"workflow", "branch"}
+            or not valid_workflow(spec["workflow"]) or not valid_branch(spec["branch"])):
+        raise ValueError("Invalid upstream declaration")
     if expected_sha and not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
         raise ValueError("Invalid upstream commit")
-    tip = api("repos/%s/commits/main" % source, token)["sha"]
+    branch = spec["branch"]
+    tip = api("repos/%s/commits/%s" % (source, quote(branch, safe="/")), token)["sha"]
     if expected_sha and tip != expected_sha:
         print("Obsolete notification: a newer upstream commit exists.")
         return None
-    query = urlencode({"head_sha": tip, "branch": "main", "event": "push", "per_page": 100})
-    runs = api("repos/%s/actions/workflows/%s/runs?%s" % (source, SOURCES[source], query), token)
+    query = urlencode({"head_sha": tip, "branch": branch, "event": "push", "per_page": 100})
+    runs = api("repos/%s/actions/workflows/%s/runs?%s" % (source, spec["workflow"], query), token)
     if not successful_run(runs, tip):
         raise RuntimeError("The latest upstream commit has not passed its required workflow")
     return tip
@@ -187,10 +298,39 @@ def dispatch_targets(targets, credentials, source, sha):
         raise RuntimeError("%s subscription notifications failed; inspect credentials and access" % failed)
 
 
-def git(*args, capture=True):
+def git(*args, capture=True, env=None):
     result = subprocess.run(["git", *args], check=True, text=True,
-                            stdout=subprocess.PIPE if capture else None, **_no_window())
+                            stdout=subprocess.PIPE if capture else None, **_no_window(env=env))
     return result.stdout.strip() if capture else ""
+
+
+def github_auth_env(token, base=None):
+    """Environment that authenticates one git process to github.com over HTTPS.
+
+    The credential travels only in GIT_CONFIG_* variables of that child process: never in argv
+    (visible to process listings and to CalledProcessError text), never in a URL, never in a config
+    file that outlives the command. The first entry resets any persisted extra header, such as the
+    one actions/checkout writes into each submodule's config, so the request carries exactly one
+    Authorization header. SSH-form github.com URLs are rewritten to HTTPS for the same process.
+    """
+    if not isinstance(token, str) or not token.strip():
+        raise RuntimeError("An upstream fetch credential is required")
+    env = dict(os.environ if base is None else base)
+    try:
+        start = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    except ValueError:
+        raise RuntimeError("Invalid GIT_CONFIG_COUNT in the environment") from None
+    if start < 0:
+        raise RuntimeError("Invalid GIT_CONFIG_COUNT in the environment")
+    credential = base64.b64encode(("x-access-token:" + token).encode()).decode()
+    entries = (("http.https://github.com/.extraheader", ""),
+               ("http.https://github.com/.extraheader", "AUTHORIZATION: basic " + credential),
+               ("url.https://github.com/.insteadOf", "git@github.com:"))
+    for offset, (key, value) in enumerate(entries):
+        env["GIT_CONFIG_KEY_%d" % (start + offset)] = key
+        env["GIT_CONFIG_VALUE_%d" % (start + offset)] = value
+    env["GIT_CONFIG_COUNT"] = str(start + len(entries))
+    return env
 
 
 def require_hooks():
@@ -298,17 +438,20 @@ def refresh_visibility_receipt(guard, root, token):
     print("Visibility metadata refreshed for %s publication destinations." % len(repositories))
 
 
-def update_consumer(source, expected_sha, token, *, refresh_visibility=False):
-    if source not in (*SOURCES, "all"):
-        raise ValueError("Unknown upstream repository")
+def update_consumer(source, expected_sha, token, *, refresh_visibility=False, sources=None):
+    sources = sources or {}
+    if source != "all":
+        # Neither built-in nor declared: refused, never widened into a full reconciliation.
+        source = resolve_source(source, sources)[0]
     if git("status", "--porcelain"):
         raise RuntimeError("Consumer checkout is not clean")
-    modules = select_modules(Path(".gitmodules").read_text(encoding="utf-8"), source)
+    modules = select_modules(Path(".gitmodules").read_text(encoding="utf-8"), source, sources)
     if not modules:
         raise RuntimeError("No matching upstream submodule is installed")
     changed = []
     for module in modules:
-        sha = verified_tip(module["source"], expected_sha, token)
+        spec = resolve_source(module["source"], sources)[1]
+        sha = verified_tip(module["source"], expected_sha, token, spec)
         if not sha:
             continue
         path = module["path"]
@@ -318,10 +461,12 @@ def update_consumer(source, expected_sha, token, *, refresh_visibility=False):
         old = entry[1]
         if old == sha:
             continue
-        # Fetch only the declared upstream, never an arbitrary payload URL.
-        git("submodule", "update", "--init", "--", path, capture=False)
+        # Fetch only the declared upstream branch, never an arbitrary payload URL. The credential
+        # reaches git through this process's environment only, so private upstreams work too.
+        auth = github_auth_env(token)
+        git("submodule", "update", "--init", "--", path, capture=False, env=auth)
         git("-C", path, "fetch", "https://github.com/%s.git" % module["source"],
-            "refs/heads/main", capture=False)
+            "refs/heads/" + spec["branch"], capture=False, env=auth)
         git("-C", path, "merge-base", "--is-ancestor", old, sha)
         git("-C", path, "checkout", "--detach", sha, capture=False)
         git("add", "--", path)
@@ -330,7 +475,8 @@ def update_consumer(source, expected_sha, token, *, refresh_visibility=False):
     if sorted(staged) != sorted(changed):
         raise RuntimeError("Unexpected staged files; refusing to commit")
     if changed:
-        guard_modules = select_modules(Path(".gitmodules").read_text(encoding="utf-8"), "DaizeDong/fleet-guards")
+        guard_modules = select_modules(Path(".gitmodules").read_text(encoding="utf-8"),
+                                       "DaizeDong/fleet-guards", sources)
         if len(guard_modules) != 1:
             raise RuntimeError("A single fleet-guards submodule is required for the commit gate")
         guard = Path(guard_modules[0]["path"])
@@ -368,14 +514,35 @@ def main():
         parser.error("--refresh-visibility is only valid for update")
     source = os.environ.get("SOURCE_REPOSITORY", "")
     expected_sha = os.environ.get("SOURCE_SHA", "")
-    token = os.environ["GH_TOKEN"]
     if args.command == "dispatch":
-        sha = verified_tip(source, expected_sha, token)
+        source, spec = dispatch_source(source, os.environ.get("FLEET_SYNC_UPSTREAM_WORKFLOW", ""),
+                                       os.environ.get("FLEET_SYNC_UPSTREAM_BRANCH", ""))
+        token = os.environ["GH_TOKEN"]
+        sha = verified_tip(source, expected_sha, token, spec)
         if sha:
             dispatch_targets(parse_targets(os.environ["FLEET_SYNC_TARGETS"]),
                              json.loads(os.environ["FLEET_SYNC_CREDENTIALS"]), source, sha)
     else:
-        update_consumer(source, expected_sha, token, refresh_visibility=args.refresh_visibility)
+        sources = parse_sources(os.environ.get("FLEET_SYNC_SOURCES", ""))
+        if os.environ.get("FLEET_SYNC_EVENT") == "repository_dispatch":
+            # A notification names one upstream; it is never a reason to reconcile everything.
+            if source in ("", "all"):
+                raise ValueError("A dispatch notification must name its upstream repository")
+        elif not source:
+            source = "all"
+        token = os.environ["GH_TOKEN"]
+        update_consumer(source, expected_sha, token, refresh_visibility=args.refresh_visibility,
+                        sources=sources)
+
+
+def dispatch_source(source, workflow, branch):
+    """Resolve the notifying repository: a built-in kit, or an upstream naming its own gate."""
+    if not workflow and not branch:
+        return resolve_source(source)
+    if not workflow or not branch:
+        raise ValueError("A custom upstream must name both its gate workflow and its branch")
+    declared = parse_sources(json.dumps({source: {"workflow": workflow, "branch": branch}}))
+    return resolve_source(source, declared)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,15 @@ on:
         type: string
         required: false
         default: '"ubuntu-latest"'
+      sources:
+        description: >-
+          Optional extra upstreams this consumer follows, as a JSON object mapping
+          "owner/repo" to {"workflow": "<gate workflow file>", "branch": "<branch>"}.
+          The built-in kits are always followed on main and cannot be redeclared.
+          The sync token must be able to read every declared upstream.
+        type: string
+        required: false
+        default: ''
     secrets:
       sync-token:
         required: true
@@ -47,7 +56,9 @@ jobs:
         working-directory: consumer
         env:
           GH_TOKEN: ${{ secrets.sync-token }}
-          SOURCE_REPOSITORY: ${{ github.event.client_payload.source_repository || 'all' }}
+          SOURCE_REPOSITORY: ${{ github.event.client_payload.source_repository || '' }}
           SOURCE_SHA: ${{ github.event.client_payload.source_sha || '' }}
+          FLEET_SYNC_EVENT: ${{ github.event_name }}
+          FLEET_SYNC_SOURCES: ${{ inputs.sources }}
           CONSUMER_BRANCH: ${{ github.event.repository.default_branch }}
         run: python ../fleet-sync-tool/tools/fleet_sync.py update --refresh-visibility

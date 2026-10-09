@@ -1,0 +1,33 @@
+# Copy into a custom (for example private) upstream as .github/workflows/fleet-notify.yml.
+#
+# Synthetic example: the upstream example/upstream publishes from master and gates every push with
+# .github/workflows/ci.yml, whose `name:` is "ci". Replace the three marked values with yours.
+# Store FLEET_SYNC_TARGETS and FLEET_SYNC_CREDENTIALS as Actions secrets of this upstream; see
+# docs/AUTOMATIC_SYNC.md in fleet-guards. Each consumer declares this upstream under `sources`.
+name: Notify fleet consumers
+
+on:
+  workflow_run:
+    workflows: [ci]            # 1. the gate workflow's `name:`
+    types: [completed]
+    branches: [master]         # 2. the published branch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: notify-fleet-consumers
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    uses: DaizeDong/fleet-guards/.github/workflows/dispatch-consumers.yml@main
+    with:
+      workflow: ci.yml         # 3. the gate workflow's file name
+      branch: master           # must equal 2.
+    secrets:
+      targets: ${{ secrets.FLEET_SYNC_TARGETS }}
+      credentials: ${{ secrets.FLEET_SYNC_CREDENTIALS }}

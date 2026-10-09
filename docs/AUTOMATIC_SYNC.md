@@ -25,7 +25,9 @@ to that commit in a separate commit.
 
 1. Install the kit as a submodule using its public HTTPS URL. The `.gitmodules`
    entry must track `main`, or omit `branch` to use `main`. Other branches are
-   rejected rather than silently moved. Submodule paths are read from
+   rejected rather than silently moved; a custom upstream tracks its declared
+   branch instead, see [Private or custom upstreams](#private-or-custom-upstreams).
+   Submodule paths are read from
    `.gitmodules`; they do not have to be named `guards` or `style`.
 2. Complete the fleet-guards hook installation. Commit `.githooks/pre-commit`
    and `.githooks/pre-push` forwarding shims that fail if the guard kit is absent.
@@ -102,14 +104,78 @@ sends up to four notifications concurrently, checks HTTP errors, and fails if an
 notification fails. Its public output contains aggregate counts, never subscriber
 names or credential values. Duplicate subscriptions and an empty list are errors.
 
+## Private or custom upstreams
+
+The two kits are built in: they are always followed on `main` through their own
+gate workflows, and no declaration can change that. Any other repository, public
+or private, can join the same path as a custom upstream. Nothing about it is
+recorded in this kit; the upstream and each consumer declare it themselves. The
+names below are synthetic: `example/upstream` publishes from `master` and gates
+every push with `.github/workflows/ci.yml`, whose `name:` is `ci`.
+
+On the upstream:
+
+1. Run a gate workflow on every push to the published branch. Only a successful
+   `push` run of that workflow on the branch tip qualifies, exactly as for the
+   kits; a failed or still-running latest attempt blocks notification.
+2. Copy [the notify template](../templates/upstream-notify.yml) to
+   `.github/workflows/fleet-notify.yml`. Set the `workflow_run` name and branch
+   filter, and pass the gate's file name and the branch as the `workflow` and
+   `branch` inputs of the reusable `dispatch-consumers.yml`. The dispatcher
+   verifies the tip of that branch against that workflow before sending anything.
+3. Create the `FLEET_SYNC_TARGETS` and `FLEET_SYNC_CREDENTIALS` Actions secrets on
+   the upstream, in the same format as for the kits above. The dispatch output
+   still contains only aggregate counts.
+
+On each consumer:
+
+1. Add the upstream as a submodule. Its `.gitmodules` entry must name the declared
+   branch; a missing `branch` means `main`, so an upstream that publishes from
+   `master` needs `branch = master`. A mismatch stops the run instead of tracking
+   the wrong branch.
+2. Declare the upstream in `.github/workflows/fleet-sync.yml`:
+
+   ```yaml
+   jobs:
+     sync:
+       uses: DaizeDong/fleet-guards/.github/workflows/sync-consumer.yml@main
+       with:
+         sources: '{"example/upstream": {"workflow": "ci.yml", "branch": "master"}}'
+       secrets:
+         sync-token: ${{ secrets.FLEET_SYNC_TOKEN }}
+   ```
+
+   The value is a JSON object keyed by `owner/repo`; each entry has exactly the
+   fields `workflow` (a file name, no path) and `branch`. Malformed JSON, unknown
+   fields, invalid names, duplicate entries and any attempt to redeclare a built-in
+   kit with other settings are errors. Declaring a kit with its own settings is
+   accepted and changes nothing.
+3. `FLEET_SYNC_TOKEN` must be able to read the private upstream: Contents read and
+   Actions read on it, in addition to the consumer permissions listed earlier. It
+   is used for the initial `actions/checkout` with submodules, for the API checks,
+   and for the fetch. The updater gives git that credential only through the
+   environment of each fetch command, never in a URL, an argument or a persisted
+   config file, and it replaces rather than duplicates the header that
+   `actions/checkout` persists in submodule configs.
+
+A notification names one upstream. A payload naming a repository that is neither
+built in nor declared by the consumer is rejected; it never falls back to
+reconciling everything. Scheduled and manual runs reconcile every built-in and
+declared upstream. Ancestry checks and obsolete-notification handling are the same
+as for the kits.
+
+GitHub Actions minutes on private repositories are billed to their owner. The gate,
+the notify workflow and each consumer's sync job all count.
+
 ## Verification and recovery
 
-The source gate is `pii-guard.yml` for fleet-guards and `style.yml` for fleet-style.
-Only a successful `push` run for the current `main` commit qualifies. A failed or
+The source gate is `pii-guard.yml` for fleet-guards and `style.yml` for fleet-style,
+and the declared workflow for a custom upstream. Only a successful `push` run for
+the current commit of the tracked branch (`main` for the kits) qualifies. A failed or
 still-running latest attempt does not borrow a previous run's success. Notifications
 for older commits become no-ops, and git ancestry checks prevent rollback.
 
-Consumer runs are serialized. A daily schedule reconciles both installed kits,
+Consumer runs are serialized. A daily schedule reconciles every installed kit and declared upstream,
 covering missed or coalesced notifications. Public scheduled workflows may be
 disabled by GitHub after prolonged repository inactivity; dispatch and manual runs
 remain the primary triggers. Repeated runs at the same pins make no commit.
