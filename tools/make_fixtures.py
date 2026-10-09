@@ -1740,7 +1740,7 @@ if argv[:2] == ["repo", "view"]:
     canonical = state.get("renamed", {}).get(name.casefold(), name)
     out.write(json.dumps({"nameWithOwner": canonical,
                           "visibility": state["visibility"][name.casefold()]}).encode("utf-8"))
-    sys.exit(0)
+    sys.exit(state.get("view_exit", 0))
 if argv[:2] == ["auth", "switch"]:
     sys.stderr.write("synthetic gh refuses to change the active account\n")
     sys.exit(3)
@@ -1750,11 +1750,13 @@ sys.exit(2)
 
 
 def make_gh_cli_stub(root, *, accounts, active, sees, visibility, ambient_tokens=None,
-                     broken=(), renamed=None, status_exit=0):
+                     broken=(), renamed=None, status_exit=0, view_exit=0):
     """Install a synthetic `gh` on a private PATH directory and return its layout.
 
     Logins and repositories are synthetic; tokens come from synthetic_token(). `sees` maps a
     credential label (a login, or an ambient token label) to the repositories it can read.
+    view_exit is the exit code of a `repo view` that printed its JSON answer (a nonzero exit
+    after valid-looking output must not count as an answer).
     """
     import os
     import stat
@@ -1768,7 +1770,8 @@ def make_gh_cli_stub(root, *, accounts, active, sees, visibility, ambient_tokens
              "sees": {label: list(names) for label, names in sees.items()},
              "visibility": {name.casefold(): value for name, value in visibility.items()},
              "renamed": {name.casefold(): value for name, value in (renamed or {}).items()},
-             "broken": list(broken), "status_exit": status_exit, "log": str(root / "gh-calls.jsonl")}
+             "broken": list(broken), "status_exit": status_exit,
+             "view_exit": view_exit, "log": str(root / "gh-calls.jsonl")}
     state_path = root / "gh-state.json"
     state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
     program = root / "gh_stub.py"

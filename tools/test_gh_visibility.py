@@ -185,3 +185,25 @@ def test_package_runtime_exposes_the_same_query(tmp_path, monkeypatch):
     spec.loader.exec_module(runtime)
     assert runtime.query_github_visibility(REPOSITORY) == "PRIVATE"
     assert [call["credential"] for call in views(stub)] == ["example-owner"]
+
+
+@pytest.mark.parametrize("reported", [None, "", "SECRET", "private"],
+                         ids=["missing", "empty", "unknown", "wrong-case"])
+def test_answer_without_a_valid_visibility_is_never_private(tmp_path, monkeypatch, reported):
+    """Only GitHub's own PRIVATE/PUBLIC/INTERNAL counts; anything else is no answer, never PRIVATE."""
+    stub = make_gh_cli_stub(tmp_path, accounts=["example-owner"], active="example-owner",
+                            sees={"example-owner": [REPOSITORY]}, visibility={REPOSITORY: reported})
+    install(monkeypatch, stub)
+    with pytest.raises(db.GitError):
+        db.query_github_visibility(REPOSITORY)
+    assert views(stub)
+
+
+def test_nonzero_exit_after_valid_output_is_not_an_answer(tmp_path, monkeypatch):
+    stub = make_gh_cli_stub(tmp_path, accounts=["example-owner"], active="example-owner",
+                            sees={"example-owner": [REPOSITORY]}, visibility={REPOSITORY: "PRIVATE"},
+                            view_exit=1)
+    install(monkeypatch, stub)
+    with pytest.raises(db.GitError):
+        db.query_github_visibility(REPOSITORY)
+    assert views(stub)
