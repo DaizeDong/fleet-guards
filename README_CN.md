@@ -1,6 +1,6 @@
 # fleet-guards
 
-这个舰队的闸门套件，集中在一个仓库里，以 git submodule 的形式被消费：九条检测规则、一道数据边界，以及一组在自己缺席时拒绝放行的钩子。
+Git 仓库共用的发布检查套件，提供九条检测规则、数据边界和检查缺失时阻断操作的钩子。消费仓通过 Git submodule 固定使用的版本。
 
 Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACKAGE.md)。包版本 0.2.1 将现有
 解析器与 PRIVATE 准入实现映射进 wheel；消费方显式提供自己的根目录，源码里只保留一份实现。
@@ -17,24 +17,13 @@ Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACK
 
 ## ⭐ 先读这里, 设计理念
 
-有三条承诺贯穿全仓，它们比规则清单更值得先看。
+这套工具结合存储边界、标识符扫描和明确的失败报告。
 
-**出口处的筛子拦不住一根对着它的管子。** `pii_guard` 读的是即将发布出去的内容，把闻着像私事的东
-西标出来。那是兜底，不是主控制。2026-07 的审计查出公开仓里装着真实运行产出，而且不是谁手工粘进
-去的，是 skill 自己天天写进去的，按设计写：一份决策账本、一份购买记录、一份活动日志。一条带进场
-价的持仓记录里没有地址也没有电话，内容扫描器根本无从闻起。所以主控制是结构性的：每个路径必属
-`.dataclass.json` 里声明的某一类，凡是真实运行产出的东西都住在私有伴生仓里，在公开仓中物理上不
-存在。
+**真实产出与公开源码分离。** 2026-07 的审计发现，仓内相对输出路径把真实运行记录写进了公开仓。记录即使不含邮箱或电话，也可能包含私有事实，因此内容扫描只能补充存储边界。每个路径必须在 `.dataclass.json` 中分类，真实产出存入独立的 PRIVATE 伴生仓。
 
-**用白名单，因为黑名单是由泄漏的那个人写的。** 一份手工列出的禁词表，只能挡住作者本来就想得到的
-那些；而一个装满真实标识符的文件，本身就是你想避免发布的那份文档。所以扫描器标记的是：一切长得
-像真实世界标识符、又不属于已声明的合成命名空间的东西，包括谁都没预料到的供应商。它里面没有任何
-私有数据，可以放心公开。私有词表只待在一台机器上，永远不进任何仓库。
+**只放行声明的合成标识符。** 结构规则检查合成命名空间之外的标识符，私有词表补充扫描器无法推断的名称。公开扫描器不携带私有标识符，私有词表保留在公开仓之外。
 
-**缺席是失败，不是跳过的理由。** 凡是「某项检查有可能缺席」的状态，一律判为拦截：submodule 目录
-空着、扫描器文件不在、`.dataclass.json` 压根没写、git 命令执行失败而不是列出了零个文件。一个包在
-`if [ -f ... ]` 里的步骤，会在文件缺失时从报告里整条消失，而一份少了一行的报告，读起来跟全都通过
-的报告一模一样。「干净」和「根本没查」必须是两种不同的输出。
+**检查不完整时失败。** 扫描器缺失、子模块为空、声明不存在或 Git 读取失败，都必须阻断对应检查。报告应区分“检查完成且没有发现”和“没有完成检查”。
 
 ## 它是什么（不是什么）
 
@@ -58,16 +47,9 @@ CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。
 此外还有 13 条识别真实运行产出的文件名模式、四个误报抑制器，以及十二个不承担任何安全职责的纯文本
 辅助函数。
 
-它**不是** Claude Code 的 skill 或 plugin，也不带 `SKILL.md`：这里没有任何东西会被 agent 调用。它
-**不是**文风套件，纯属文风与架构的那两道闸门，`dash_guard` 和 `load_budget`，住在 `fleet-style`：
-它们占这个仓 17.5% 的行数，而其中没有一行是在阻止某个标识符进入公开历史。它**不是**私有仓，也绝不
-能变成私有仓：一个私有 submodule 会让每一个公开消费者的 CI 当场挂掉。
+本仓通过 Git/CI 使用，没有 Claude Code skill 或 plugin 入口。文风和加载预算检查由 `fleet-style` 维护；最初拆出的 `dash_guard` 和 `load_budget` 占当时套件的 17.5%。本子模块必须保持公开，确保公开消费仓能在 CI 中获取。
 
-在这个仓存在之前，套件是手工拷进每一个消费仓的：17 个文件、7,643 行，乘以 22 个仓，磁盘上约 191,000
-行。那些拷贝是逐字节相同的，一个安装器就能把它们全部重新同步，所以重复本身并不是代价。真正的代价
-是：安装器依据的是一份手写的仓库清单，而一个不在清单里的仓，用安装器自己的话说，得到的是「一道
-闸门的样子，和零维护」。两个公开仓正是因为这个原因长期挂着一个 fail open 的 pre-push 钩子，2026-08-31
-查出。submodule 把那份清单换成了一个住在消费仓自己身上的指针。
+旧部署把 17 个文件、每套 7,643 行复制到 22 个消费仓，历史清单记录磁盘上约有 191,000 行。安装器依赖人工维护的仓库列表；2026-08-31 的审计发现，两个遗漏的公开仓仍使用 fail-open pre-push 钩子。现在每个消费仓用自身版本历史中的 submodule 指针声明依赖。
 
 ## 安装
 
@@ -86,9 +68,7 @@ CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。
 独立部署应运行该仓自己的 `tools/data_boundary.py`，也可用 `--companion-dir` 明确指定数据目录。
 子模块或解析器缺失时检查会失败，不会转去加载消费仓里遗留的副本。
 
-一定要用 HTTPS URL，不要用 ssh 主机别名。`.gitmodules` 是提交并共享的，所以这个 url 必须对每一个克隆
-者都能解析，包括 CI runner。第一次迁移用了本机 ssh 别名，三个 workflow 全部当场以 "Could not read from
-remote repository" 失败。
+`.gitmodules` 使用 HTTPS URL，确保其他机器和 CI 可以解析。首次迁移使用本机 SSH 主机别名，导致三个 workflow 均以 "Could not read from remote repository" 失败。
 
 克隆时带 `--recursive`，或者事后补 `git submodule update --init`。CI 必须在 `actions/checkout` 上设
 `submodules: true`。
@@ -109,17 +89,19 @@ remote repository" 失败。
 在消费仓根目录手工跑同样这几项：
 
 ```bash
-python guards/tools/pii_guard.py --tree --history
-python guards/tools/data_boundary.py
+python guards/tools/publication_guard.py ci
 python guards/tools/test_companion_contract.py
 ```
+
+常规钩子和 CI 使用[发布策略](docs/PUBLICATION_POLICY.md)：只有当前证据证明全部物理及生效 fetch/push 目标均为 PRIVATE，才允许私有内容；证据缺失时继续执行公开策略。PRIVATE 仓仍检查声明、schema、fixture、路径和提交身份。直接运行 `pii_guard.py --tree --history` 或 `data_boundary.py` 始终采用公开策略。伴生仓准入、证据有效期和传输要求见 [COMPANION.md](COMPANION.md#verifying-a-companion)。
 
 ## 里面有什么
 
 | 路径 | 是什么 |
 | --- | --- |
 | `tools/pii_guard.py` | 扫描器。基于白名单，结构化，跑工作树也跑完整历史。 |
-| `tools/data_boundary.py` | 主控制。问的是：这个仓是一件未初始化的工具，还是装着某个人的人生。 |
+| `tools/data_boundary.py` | 检查路径分类、fixture 和真实产出边界。 |
+| `tools/publication_guard.py` | 根据已证明的仓库可见性选择常规钩子和 CI 策略。 |
 | `tools/datadir.py` | 解析器。决定真实运行产出往哪写，而答案永远在仓库之外。 |
 | `tools/fleet_sync.py` | 分发已验证的上游更新，并推进各消费仓的 gitlink。 |
 | `tools/test_*.py` | 套件自己的测试，含那一层私有部分在 runner 上永远不存在的策略层。 |
@@ -149,8 +131,7 @@ data_boundary: clean (0 DATA + 0 sealed paths not tracked, 0 FIXTUREs generator-
 28 tracked files carry no real-run shape)
 ```
 
-两个都打印一个计数，而计数正是重点。一份「什么都没扫」的 clean，正是这个套件花了大部分行数在防的那
-件事。
+报告列出实际检查和排除数量，用于判断覆盖范围；空扫描或未完成扫描不能作为通过证据。
 
 ## 必须知道的那个失效形态
 
@@ -174,29 +155,22 @@ data_boundary: clean (0 DATA + 0 sealed paths not tracked, 0 FIXTUREs generator-
 
 ## 局限
 
-**装上这个 submodule 之后，有四件事的行为会变。** 这是在一个真实消费仓上实测的，不是推演的，而且只有
-一件会真的挡住你。
+以下兼容性结论来自一个消费仓的检查，不能代表所有消费方配置。
 
 pre-commit 框架会拒绝安装：`pre-commit install` 打印 "Cowardly refusing to install hooks with
 `core.hooksPath` set"，并建议你去掉那个设置。照它说的做，你会得到一个能用的格式化器和零闸门。
 `.githooks/` 里的转发脚本会在配置和二进制都在时自己去调 `pre-commit run`，所以两者都跑，而闸门排在最
 后：一个会重写文件的格式化器没法把改动绕过扫描。
 
-有人拿 linter 走进来。这套件在 ruff 默认规则下是干净的。在一套更强硬的规则下则不干净，也不可能干净：
-那个级别下有 155 条发现是「把 %-格式化改写成 f-string」，散落在一个扫描器里，而这种改动买不到任何正确
-性。要开就用 `extend-exclude = ["guards", "style"]` 把 submodule 排除掉。
+该次检查通过了 ruff 默认规则；更严格的配置报告了 155 条把 %-格式化改成 f-string 的建议。消费仓使用自己的 lint 策略时，可用 `extend-exclude = ["guards", "style"]` 排除子模块。
 
 你自己那个同名模块会赢。当仓库自己的目录排在 `sys.path` 前面时，`import datadir` 解析到的是仓库自己那
 份，不是套件这份。根目录的 `conftest.py` 同样赢过这里的那份。反过来只会在你把套件路径排到前面时发生，
 那是一个选择，不是默认。
 
-其余的都查过，都是非事件：新增的顶层 package 和它的测试照常被收集，`find_packages()` 从 submodule 里返
-回零个包，根目录跑 `pytest` 不会把套件的测试卷进来（`pytest guards/tools/` 仍然照跑，这是刻意的），带
-`testpaths` 的 `pytest.ini` 在这里什么都不改，测试跑完 submodule 也从不显示为 dirty。
+该次消费仓检查中，新增顶层 package 和测试正常收集，`find_packages()` 不收集子模块，根目录 `pytest` 不收集套件测试，而显式 `pytest guards/tools/` 会收集。`pytest.ini` 的 `testpaths` 没有改变结果，测试结束后子模块保持 clean。
 
-**这套件关不掉的是什么。** 边界让 agent 抄不到真实文件，因为手边根本没有真实文件。结构规则认形状，私
-有词表认名字。这三者都认不出「没点名任何标识符、却泄露了一件私事」的散文。那一件背后没有任何机制，只
-有一条规则：永远不要用真实的例子。
+**散文中的私有事实仍是缺口。** DATA 不在公开源码中，可以避免把这些文件误带进产物。结构规则识别标识符，私有词表识别已配置名称，但它们不能证明一段文字没有泄露私事。公开示例必须使用合成数据。
 
 ## 语言
 
