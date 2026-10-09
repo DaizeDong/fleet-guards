@@ -4,6 +4,20 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ## [Unreleased]
 
+### Added
+
+- **Live repository visibility no longer depends on the active gh account.**
+  `query_github_visibility(OWNER/NAME)` in `tools/data_boundary.py` (and
+  `fleet_guards.runtime`) asks with the owner's stored gh account first, then
+  every other stored account, then gh's default credential, borrowing each
+  token for one child process through `GH_TOKEN`. It never switches or reads
+  the active account, never prints a token, accepts only an answer that names
+  the requested repository, and raises `GitError` when no credential can see
+  it. A consumer that confirmed a receipt with a plain `gh repo view` failed
+  closed whenever another session switched the active account to one without
+  access. A synthetic `gh` from `tools/make_fixtures.py` covers the incident,
+  the fallbacks and the refusal.
+
 ### Changed
 
 - **PRIVATE companion proofs accept Git's native hook helper path.** SSH and

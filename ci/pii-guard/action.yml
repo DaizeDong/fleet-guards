@@ -123,6 +123,13 @@ runs:
           echo "::error::the guards submodule has no test_no_console_window.py"; exit 1; }
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_no_console_window.py" -q
 
+    - name: Live visibility tests (does the answer depend on the active gh account?)
+      shell: bash
+      run: |
+        test -f "$GITHUB_ACTION_PATH/../../tools/test_gh_visibility.py" || {
+          echo "::error::the guards submodule has no test_gh_visibility.py"; exit 1; }
+        python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_gh_visibility.py" -q
+
     - name: CI test coverage (does every shipped pytest module run here?)
       shell: bash
       run: |

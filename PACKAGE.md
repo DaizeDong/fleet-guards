@@ -37,6 +37,11 @@ path checks, current PRIVATE proof and ignore checks described in
 proof is a filesystem lock. Repeat admission before a write. The wheel includes
 the proof's visibility-receipt dependency, and missing or stale proof fails closed.
 
+`query_github_visibility(repository)` asks GitHub live for one `OWNER/NAME`
+through the gh CLI with any stored account that can see it, owner first, so the
+answer does not depend on which account is active. It raises `GitError` when no
+credential can answer; see [COMPANION.md](COMPANION.md#proof-api).
+
 ## Credential scanning
 
 ```python
