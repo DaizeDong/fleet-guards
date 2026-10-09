@@ -73,6 +73,11 @@ def prove_private_companion(destination, *, visibility_map=None):
         destination, visibility_map=visibility_map)
 
 
+def query_github_visibility(repository, *, timeout=20):
+    """Ask GitHub for OWNER/NAME's visibility with any logged-in gh account, never the active one alone."""
+    return _canonical("data_boundary").query_github_visibility(repository, timeout=timeout)
+
+
 def authorize_artifact_write(source_root, companion_root, relative_path, **options):
     """Apply the canonical source contract and current PRIVATE admission before a write."""
     return _canonical("storage_contract").authorize_artifact_write(

@@ -1700,3 +1700,97 @@ def make_storage_short_name_fixture(layout, kind):
         raise ctypes.WinError(ctypes.get_last_error())
     alias = target.with_name(Path(buffer.value).name)
     return root, target, alias.relative_to(root).as_posix()
+
+
+# ------------------------------------------------- a synthetic gh CLI for the visibility query
+GH_STUB_PROGRAM = r'''
+import json, os, sys
+state_path, argv = sys.argv[1], sys.argv[2:]
+with open(state_path, encoding="utf-8") as stream:
+    state = json.load(stream)
+tokens = {login.casefold(): token for login, token in state["tokens"].items()}
+owners = {token: login for login, token in state["tokens"].items()}
+owners.update({token: label for label, token in state.get("ambient_tokens", {}).items()})
+explicit = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+credential = explicit if explicit else tokens.get(state["active"].casefold())
+with open(state["log"], "a", encoding="utf-8") as log:
+    log.write(json.dumps({"argv": argv, "credential": owners.get(credential, "unknown") if credential else None,
+                          "explicit": bool(explicit), "gh_host": os.environ.get("GH_HOST")}) + "\n")
+out = sys.stdout.buffer
+if argv[:2] == ["auth", "status"]:
+    for login in state["accounts"]:
+        active = "true" if login.casefold() == state["active"].casefold() else "false"
+        out.write(("github.com\n  ✓ Logged in to github.com account %s (keyring)\n"
+                   "  - Active account: %s\n" % (login, active)).encode("utf-8"))
+    sys.exit(state.get("status_exit", 0))
+if argv[:2] == ["auth", "token"]:
+    login = argv[argv.index("--user") + 1] if "--user" in argv else state["active"]
+    token = tokens.get(login.casefold())
+    if token is None or login.casefold() in {name.casefold() for name in state.get("broken", [])}:
+        sys.stderr.write("no oauth token found for github.com account %s\n" % login)
+        sys.exit(1)
+    out.write((token + "\n").encode("utf-8"))
+    sys.exit(0)
+if argv[:2] == ["repo", "view"]:
+    name = argv[2]
+    visible = {repository.casefold() for repository in state["sees"].get(owners.get(credential, ""), [])}
+    if name.casefold() not in visible:
+        sys.stderr.write("GraphQL: Could not resolve to a Repository with the name '%s'.\n" % name)
+        sys.exit(1)
+    canonical = state.get("renamed", {}).get(name.casefold(), name)
+    out.write(json.dumps({"nameWithOwner": canonical,
+                          "visibility": state["visibility"][name.casefold()]}).encode("utf-8"))
+    sys.exit(state.get("view_exit", 0))
+if argv[:2] == ["auth", "switch"]:
+    sys.stderr.write("synthetic gh refuses to change the active account\n")
+    sys.exit(3)
+sys.stderr.write("unsupported synthetic gh call\n")
+sys.exit(2)
+'''
+
+
+def make_gh_cli_stub(root, *, accounts, active, sees, visibility, ambient_tokens=None,
+                     broken=(), renamed=None, status_exit=0, view_exit=0):
+    """Install a synthetic `gh` on a private PATH directory and return its layout.
+
+    Logins and repositories are synthetic; tokens come from synthetic_token(). `sees` maps a
+    credential label (a login, or an ambient token label) to the repositories it can read.
+    view_exit is the exit code of a `repo view` that printed its JSON answer (a nonzero exit
+    after valid-looking output must not count as an answer).
+    """
+    import os
+    import stat
+    import sys
+    root = Path(root)
+    directory = root / "gh-bin"
+    directory.mkdir(parents=True)
+    tokens = {login: synthetic_token("gh-account-" + login) for login in accounts}
+    ambient = {label: synthetic_token("gh-ambient-" + label) for label in (ambient_tokens or ())}
+    state = {"accounts": list(accounts), "active": active, "tokens": tokens, "ambient_tokens": ambient,
+             "sees": {label: list(names) for label, names in sees.items()},
+             "visibility": {name.casefold(): value for name, value in visibility.items()},
+             "renamed": {name.casefold(): value for name, value in (renamed or {}).items()},
+             "broken": list(broken), "status_exit": status_exit,
+             "view_exit": view_exit, "log": str(root / "gh-calls.jsonl")}
+    state_path = root / "gh-state.json"
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    program = root / "gh_stub.py"
+    program.write_text(GH_STUB_PROGRAM, encoding="utf-8")
+    if os.name == "nt":
+        launcher = directory / "gh.cmd"
+        launcher.write_text('@"%s" -I "%s" "%s" %%*\r\n' % (sys.executable, program, state_path),
+                            encoding="utf-8")
+    else:
+        launcher = directory / "gh"
+        launcher.write_text('#!/bin/sh\nexec "%s" -I "%s" "%s" "$@"\n' % (sys.executable, program, state_path),
+                            encoding="utf-8")
+        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return {"bin": directory, "launcher": launcher, "tokens": tokens, "ambient": ambient,
+            "log": Path(state["log"]), "state": state_path}
+
+
+def gh_stub_calls(stub):
+    """The synthetic gh invocations recorded so far, oldest first."""
+    if not stub["log"].is_file():
+        return []
+    return [json.loads(line) for line in stub["log"].read_text(encoding="utf-8").splitlines() if line]
