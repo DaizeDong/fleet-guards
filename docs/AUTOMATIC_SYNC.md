@@ -113,6 +113,8 @@ recorded in this kit; the upstream and each consumer declare it themselves. The
 names below are synthetic: `example/upstream` publishes from `master` and gates
 every push with `.github/workflows/ci.yml`, whose `name:` is `ci`.
 
+A private upstream belongs only in PRIVATE consumers. A public consumer publishes the upstream's name in its `.gitmodules`, in the `sources` declaration of its workflow file, and in its Actions logs, which anyone can read (the checkout and fetch steps print the submodule URL, and the step environment shows the `sources` value). Keeping the upstream private does not hide its name once a public repository follows it. A public upstream can be followed from any consumer.
+
 On the upstream:
 
 1. Run a gate workflow on every push to the published branch. Only a successful
@@ -133,6 +135,8 @@ On each consumer:
    branch; a missing `branch` means `main`, so an upstream that publishes from
    `master` needs `branch = master`. A mismatch stops the run instead of tracking
    the wrong branch.
+
+   Each submodule path belongs to exactly one `.gitmodules` entry. Two entries on the same path, or one nested inside another's path (compared without regard to case), stop every run. A declared upstream can never sit at, inside or around a built-in kit's path: the commit gate runs the code found at the fleet-guards path, so another repository's commit must never be checked out there. The fleet-guards path must also be a tracked gitlink.
 2. Declare the upstream in `.github/workflows/fleet-sync.yml`:
 
    ```yaml
@@ -145,18 +149,8 @@ On each consumer:
          sync-token: ${{ secrets.FLEET_SYNC_TOKEN }}
    ```
 
-   The value is a JSON object keyed by `owner/repo`; each entry has exactly the
-   fields `workflow` (a file name, no path) and `branch`. Malformed JSON, unknown
-   fields, invalid names, duplicate entries and any attempt to redeclare a built-in
-   kit with other settings are errors. Declaring a kit with its own settings is
-   accepted and changes nothing.
-3. `FLEET_SYNC_TOKEN` must be able to read the private upstream: Contents read and
-   Actions read on it, in addition to the consumer permissions listed earlier. It
-   is used for the initial `actions/checkout` with submodules, for the API checks,
-   and for the fetch. The updater gives git that credential only through the
-   environment of each fetch command, never in a URL, an argument or a persisted
-   config file, and it replaces rather than duplicates the header that
-   `actions/checkout` persists in submodule configs.
+   The value is a JSON object keyed by `owner/repo`; each entry has exactly the fields `workflow` (a file name, no path) and `branch` (a short branch name). Malformed JSON, unknown fields, invalid names, duplicate entries and any attempt to redeclare a built-in kit with other settings are errors. A full ref such as `refs/heads/master` is rejected, and so is a branch name that is also a 40- or 64-character hexadecimal object id, because git and the API would read it as a commit. Declaring a kit with its own settings is accepted and changes nothing: the entry is dropped, so no declared upstream ever has a kit's URL.
+3. `FLEET_SYNC_TOKEN` must be able to read the private upstream: Contents read and Actions read on it, in addition to the consumer permissions listed earlier. It is used for the initial `actions/checkout` with submodules, for the API checks, and for the fetch. The updater gives git that credential only through the environment of each fetch command, never in a URL, an argument or a persisted config file. That environment first empties the extra headers persisted for github.com, both the header `actions/checkout` writes into submodule configs and any unscoped one, so each request carries exactly one Authorization header. One limitation remains: a header persisted for a narrower scope, such as one repository's URL, outranks these settings, and git then sends that header instead of the updater's credential (never both). Do not leave such a setting in a consumer checkout.
 
 A notification names one upstream. A payload naming a repository that is neither
 built in nor declared by the consumer is rejected; it never falls back to
@@ -164,16 +158,14 @@ reconciling everything. Scheduled and manual runs reconcile every built-in and
 declared upstream. Ancestry checks and obsolete-notification handling are the same
 as for the kits.
 
+Scheduled and manual runs commit everything or nothing, so a declared upstream is coupled to the kits there and the coupling fails closed. If any declared upstream fails during such a run (its gate is red or still running, its `.gitmodules` branch differs from the declaration, the branch no longer exists, or the token cannot read the repository), the run stops before committing and the built-in kits do not advance either. A malformed `sources` value, including one that redeclares a kit with other settings, and a `.gitmodules` file in which two entries share or nest a path stop every run, kit notifications included. A notification from a kit selects only that kit, so a declared upstream's own failures do not block it, but the daily reconciliation stays red until the declaration is repaired. To recover, fix the upstream (make its gate pass, or grant the token read access) or correct the declaration and the `.gitmodules` branch, then rerun `Sync fleet submodules`. If the upstream should no longer be followed, remove its entry from `sources`; remove the submodule as well if the consumer no longer needs it.
+
 GitHub Actions minutes on private repositories are billed to their owner. The gate,
 the notify workflow and each consumer's sync job all count.
 
 ## Verification and recovery
 
-The source gate is `pii-guard.yml` for fleet-guards and `style.yml` for fleet-style,
-and the declared workflow for a custom upstream. Only a successful `push` run for
-the current commit of the tracked branch (`main` for the kits) qualifies. A failed or
-still-running latest attempt does not borrow a previous run's success. Notifications
-for older commits become no-ops, and git ancestry checks prevent rollback.
+The source gate is `pii-guard.yml` for fleet-guards and `style.yml` for fleet-style, and the declared workflow for a custom upstream. Only a successful `push` run for the current commit of the tracked branch (`main` for the kits) qualifies. The current commit is read from the repository's branch endpoint, which resolves only a branch, so a tag or commit spelled like the branch cannot stand in for it; an answer that names another branch (a renamed branch redirects) stops the run. A failed or still-running latest attempt does not borrow a previous run's success. Notifications for older commits become no-ops, and git ancestry checks prevent rollback.
 
 Consumer runs are serialized. A daily schedule reconciles every installed kit and declared upstream,
 covering missed or coalesced notifications. Public scheduled workflows may be

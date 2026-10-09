@@ -134,12 +134,7 @@ Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always us
     git submodule update --remote guards
     git add guards && git commit -m "guards: bump"
 
-A submodule pins one commit. Consumers update manually with the commands above, or enroll in
-[automatic synchronization](docs/AUTOMATIC_SYNC.md). Once enrolled, a successful upstream check
-sends a dispatch event and the consumer records a normal gitlink update commit on its default
-branch. Its commit gates and CI still run. The same path can follow other repositories, private
-ones included, on a declared branch and gate workflow; see
-[Private or custom upstreams](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams).
+A submodule pins one commit. Consumers update manually with the commands above, or enroll in [automatic synchronization](docs/AUTOMATIC_SYNC.md). Once enrolled, a successful upstream check sends a dispatch event and the consumer records a normal gitlink update commit on its default branch. Its commit gates and CI still run. The same path can follow other repositories on a declared branch and gate workflow, private ones included, though a private upstream belongs only in private consumers because a public consumer exposes its name; see [Private or custom upstreams](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams).
 
 ## Example output
 

@@ -77,6 +77,9 @@ _REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,10
 _WORKFLOW = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\.ya?ml")
 _BRANCH_PART = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
 _BRANCH = re.compile(_BRANCH_PART + r"(?:/" + _BRANCH_PART + r")*")
+# A branch spelled like a full object name reads as a commit to git and to the API.
+_OBJECT_NAME = re.compile(r"[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}")
+_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 def valid_repository(name):
@@ -89,22 +92,61 @@ def valid_workflow(name):
 
 
 def valid_branch(name):
-    """A conservative subset of git-check-ref-format for a branch name."""
+    """A conservative subset of git-check-ref-format for a short branch name.
+
+    A full ref (refs/...) is refused because the updater adds refs/heads/ itself, and a name that
+    is also a valid object name is refused because it would name a commit rather than a branch.
+    """
     return (isinstance(name, str) and 0 < len(name) <= 200 and bool(_BRANCH.fullmatch(name))
             and ".." not in name and name != "HEAD" and not name.endswith(".")
+            and not name.startswith("refs/") and not _OBJECT_NAME.fullmatch(name)
             and not any(part.endswith(".lock") for part in name.split("/")))
 
 
+def _location(name):
+    """The github.com location an owner/repo name denotes: owner and repository ignore case."""
+    return name.lower().removesuffix(".git")
+
+
 def builtin_name(source):
-    """Canonical built-in name for a case-insensitive match, else None."""
+    """Canonical built-in name when source denotes a built-in kit's location, else None."""
     for name in SOURCES:
-        if isinstance(source, str) and source.lower() == name.lower():
+        if isinstance(source, str) and _location(source) == _location(name):
             return name
     return None
 
 
 def builtin_spec(name):
     return {"workflow": SOURCES[name], "branch": BUILTIN_BRANCH}
+
+
+def valid_spec(spec):
+    return (isinstance(spec, dict) and set(spec) == {"workflow", "branch"}
+            and valid_workflow(spec["workflow"]) and valid_branch(spec["branch"]))
+
+
+def checked_sources(sources):
+    """Validate a declared-upstream mapping as the updater receives it; return it unchanged.
+
+    parse_sources builds this mapping from the consumer's declaration, and this check holds every
+    other caller to the same rules. A declared upstream never denotes a built-in kit's location:
+    such an entry would let a declaration decide how that kit is followed.
+    """
+    if sources is None:
+        return {}
+    if not isinstance(sources, dict) or len(sources) > MAX_DECLARED_SOURCES:
+        raise ValueError("Declared upstreams must be a mapping of at most %d entries"
+                         % MAX_DECLARED_SOURCES)
+    seen = set()
+    for name, spec in sources.items():
+        if not valid_repository(name) or not valid_spec(spec):
+            raise ValueError("Invalid upstream declaration")
+        if builtin_name(name):
+            raise ValueError("A declared upstream cannot have a built-in kit's URL")
+        if _location(name) in seen:
+            raise ValueError("Duplicate upstream declaration")
+        seen.add(_location(name))
+    return sources
 
 
 def _reject_duplicate_keys(pairs):
@@ -154,11 +196,12 @@ def parse_sources(value):
 
 def resolve_source(source, sources=None):
     """Return (canonical name, spec) for a built-in or declared upstream; reject anything else."""
+    sources = checked_sources(sources)
     builtin = builtin_name(source)
     if builtin:
         return builtin, builtin_spec(builtin)
-    for name, spec in (sources or {}).items():
-        if isinstance(source, str) and source.lower() == name.lower():
+    for name, spec in sources.items():
+        if isinstance(source, str) and _location(source) == _location(name):
             return name, spec
     raise ValueError("Unknown upstream repository")
 
@@ -182,11 +225,9 @@ def api(path, token, *, body=None):
 
 
 def source_from_url(url, sources=None):
-    for source in (*SOURCES, *(sources or {})):
-        if url.lower().removesuffix(".git") in (
-            "https://github.com/" + source.lower(),
-            "git@github.com:" + source.lower(),
-        ):
+    location = url.lower().removesuffix(".git")
+    for source in (*SOURCES, *checked_sources(sources)):
+        if location in ("https://github.com/" + _location(source), "git@github.com:" + _location(source)):
             return source
     return None
 
@@ -199,14 +240,44 @@ def validate_path(path):
     return str(PurePosixPath(path))
 
 
+def _path_key(path):
+    """A .gitmodules path as a case-insensitive checkout would see it, for overlap tests only."""
+    return tuple(part.casefold() for part in path.replace("\\", "/").split("/") if part not in ("", "."))
+
+
+def _overlap(first, second):
+    """Equal paths, or one nested inside the other, share files on disk."""
+    shorter = min(len(first), len(second))
+    return bool(shorter) and first[:shorter] == second[:shorter]
+
+
 def select_modules(contents, source, sources=None):
+    """Return the entries to advance for source ("all" or one upstream name).
+
+    Every entry is checked, selected or not. A path claimed by two entries, or nested in another
+    entry's path, is refused: otherwise one upstream's commit could be checked out where another
+    upstream's files are expected, and the commit gate runs whatever sits at the fleet-guards path.
+    """
+    sources = checked_sources(sources)
     config = configparser.ConfigParser(interpolation=None)
     config.read_string(contents)
-    selected = []
+    entries = []
     for section in config.sections():
         values = config[section]
-        upstream = source_from_url(values.get("url", ""), sources)
+        entries.append((_path_key(values.get("path", "")),
+                        source_from_url(values.get("url", ""), sources), values))
+    kits = [key for key, upstream, _values in entries if upstream in SOURCES]
+    for key, upstream, _values in entries:
+        if upstream and upstream not in SOURCES and any(_overlap(key, kit) for kit in kits):
+            raise ValueError("A declared upstream cannot use or nest in a built-in kit's submodule path")
+    for index, (key, _upstream, _values) in enumerate(entries):
+        if any(_overlap(key, other) for other, _o, _v in entries[index + 1:]):
+            raise ValueError("Two .gitmodules entries claim the same or nested submodule path")
+    selected = []
+    for _key, upstream, values in entries:
         if upstream and source in ("all", upstream):
+            if "path" not in values:
+                raise ValueError("A selected .gitmodules entry has no path")
             expected = resolve_source(upstream, sources)[1]["branch"]
             # A missing branch means main, so an upstream tracked on another branch must say so.
             branch = values.get("branch", "main")
@@ -250,21 +321,28 @@ def verified_tip(source, expected_sha, token, spec=None):
 
     spec defaults to the built-in kit's settings; a built-in kit never accepts other settings.
     """
-    builtin = source in SOURCES
+    builtin = builtin_name(source)
     if spec is None:
         if not builtin:
             raise ValueError("Unknown upstream repository")
-        spec = builtin_spec(source)
-    elif builtin and spec != builtin_spec(source):
+        spec = builtin_spec(builtin)
+    elif builtin and spec != builtin_spec(builtin):
         raise ValueError("A built-in kit cannot be redeclared with other settings")
-    if (not valid_repository(source) or not isinstance(spec, dict)
-            or set(spec) != {"workflow", "branch"}
-            or not valid_workflow(spec["workflow"]) or not valid_branch(spec["branch"])):
+    source = builtin or source
+    if not valid_repository(source) or not valid_spec(spec):
         raise ValueError("Invalid upstream declaration")
-    if expected_sha and not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+    if expected_sha and not _COMMIT.fullmatch(expected_sha):
         raise ValueError("Invalid upstream commit")
     branch = spec["branch"]
-    tip = api("repos/%s/commits/%s" % (source, quote(branch, safe="/")), token)["sha"]
+    # The branches endpoint resolves only a branch. commits/<ref> would equally accept a tag or a
+    # commit of the same spelling, and a renamed branch redirects to its new name, so the answer
+    # must name the declared branch and carry a full commit id.
+    found = api("repos/%s/branches/%s" % (source, quote(branch, safe="/")), token)
+    commit = found.get("commit") if isinstance(found, dict) else None
+    tip = commit.get("sha") if isinstance(commit, dict) else None
+    if (not isinstance(tip, str) or not _COMMIT.fullmatch(tip)
+            or found.get("name") != branch):
+        raise RuntimeError("The upstream branch lookup did not return the declared branch")
     if expected_sha and tip != expected_sha:
         print("Obsolete notification: a newer upstream commit exists.")
         return None
@@ -309,9 +387,19 @@ def github_auth_env(token, base=None):
 
     The credential travels only in GIT_CONFIG_* variables of that child process: never in argv
     (visible to process listings and to CalledProcessError text), never in a URL, never in a config
-    file that outlives the command. The first entry resets any persisted extra header, such as the
-    one actions/checkout writes into each submodule's config, so the request carries exactly one
-    Authorization header. SSH-form github.com URLs are rewritten to HTTPS for the same process.
+    file that outlives the command. Git reads these entries after every config file.
+
+    How the resets work, measured with real git in tools/test_fleet_sync.py: git keeps one list of
+    extra headers and an empty value empties it, but an entry counts only if its URL scope matches
+    the request at least as closely as the best entry read before it.
+      - The github.com-scoped empty value empties everything persisted for a github.com request,
+        unscoped or github.com-scoped (actions/checkout writes the latter into every submodule
+        config), so the request carries exactly one Authorization header: this one.
+      - The unscoped empty value covers every other host: no unscoped persisted header leaves with
+        this process. For github.com it is skipped once a scoped entry has been read.
+      - A header persisted for a narrower scope, such as one repository's URL, outranks all of
+        these for that URL. Git then sends it instead of this credential, never both.
+    SSH-form github.com URLs are rewritten to HTTPS for the same process.
     """
     if not isinstance(token, str) or not token.strip():
         raise RuntimeError("An upstream fetch credential is required")
@@ -323,7 +411,8 @@ def github_auth_env(token, base=None):
     if start < 0:
         raise RuntimeError("Invalid GIT_CONFIG_COUNT in the environment")
     credential = base64.b64encode(("x-access-token:" + token).encode()).decode()
-    entries = (("http.https://github.com/.extraheader", ""),
+    entries = (("http.extraheader", ""),
+               ("http.https://github.com/.extraheader", ""),
                ("http.https://github.com/.extraheader", "AUTHORIZATION: basic " + credential),
                ("url.https://github.com/.insteadOf", "git@github.com:"))
     for offset, (key, value) in enumerate(entries):
@@ -439,7 +528,7 @@ def refresh_visibility_receipt(guard, root, token):
 
 
 def update_consumer(source, expected_sha, token, *, refresh_visibility=False, sources=None):
-    sources = sources or {}
+    sources = checked_sources(sources)
     if source != "all":
         # Neither built-in nor declared: refused, never widened into a full reconciliation.
         source = resolve_source(source, sources)[0]
@@ -479,6 +568,11 @@ def update_consumer(source, expected_sha, token, *, refresh_visibility=False, so
                                        "DaizeDong/fleet-guards", sources)
         if len(guard_modules) != 1:
             raise RuntimeError("A single fleet-guards submodule is required for the commit gate")
+        # The gate runs code from this path, so it must be the kit's own gitlink, not a tracked
+        # directory or symlink that could hold another repository's files.
+        entry = git("ls-files", "--stage", "--", guard_modules[0]["path"]).split()
+        if len(entry) < 4 or entry[0] != "160000":
+            raise RuntimeError("The fleet-guards path is not a tracked gitlink")
         guard = Path(guard_modules[0]["path"])
         for tool in ("publication_guard.py", "data_boundary.py", "pii_guard.py"):
             path = guard / "tools" / tool

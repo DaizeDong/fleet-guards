@@ -117,10 +117,7 @@ python guards/tools/test_companion_contract.py
     git submodule update --remote guards
     git add guards && git commit -m "guards: bump"
 
-一个 submodule 钉住一个 commit。消费仓可以用上面的命令手工更新，也可以接入
-[自动同步](docs/AUTOMATIC_SYNC.md)。接入之后，上游检查通过就会发出一个 dispatch 事件，消费仓在自己的
-默认分支上记录一次普通的 gitlink 更新提交。它自己的提交闸门和 CI 照常运行。同一条路径也能跟随别的仓库，私有仓
-也行，按声明的分支和检查 workflow 来；见[私有或自定义上游](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams)。
+一个 submodule 钉住一个 commit。消费仓可以用上面的命令手工更新，也可以接入[自动同步](docs/AUTOMATIC_SYNC.md)。接入之后，上游检查通过就会发出一个 dispatch 事件，消费仓在自己的默认分支上记录一次普通的 gitlink 更新提交。它自己的提交闸门和 CI 照常运行。同一条路径也能跟随别的仓库，私有仓也行，按声明的分支和检查 workflow 来；但私有上游只能放进私有消费仓，公开消费仓会把它的名字暴露出去。见[私有或自定义上游](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams)。
 
 ## 输出示例
 

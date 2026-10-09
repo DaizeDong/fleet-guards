@@ -93,6 +93,16 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Fixed
 
+- **A declared upstream can no longer take a built-in kit's place.** `.gitmodules` entries that share a path or nest one inside another (case-insensitively) stop every run, whichever upstream is selected, and a declared upstream at, inside or around a built-in kit's path is refused with its own error, so a fork can never be checked out where the commit gate runs fleet-guards code. The commit gate also requires the fleet-guards path to be a tracked gitlink. A declared upstream that names a built-in kit's repository is refused wherever a declaration is consumed, and the tip check recognises a kit in any letter case.
+
+- **Custom upstream branches are unambiguous.** A declared branch may not be a full ref (`refs/...`) or a 40- or 64-character hexadecimal name. Upstream tips are read from the branch endpoint (`repos/<owner>/<repo>/branches/<branch>`), and the answer must name the declared branch and a full commit id; the built-in kits keep following `main`.
+
+- **The fetch environment also empties unscoped extra headers.** An unscoped `http.extraheader` reset now precedes the github.com-scoped one. Measured with real git against a local server: the github.com-scoped empty value already drops both persisted forms, the unscoped reset keeps unscoped persisted headers from reaching any other host, and a header persisted for a narrower URL scope replaces the updater's credential rather than joining it. That remaining limitation is documented.
+
+- **The updater is exercised end to end.** The recorded consumer double now runs through ancestry, checkout, staging, the commit gate, commit and push, covering built-in updates on `main`, a full run over a declared `master` upstream and a kit, obsolete notifications through `update_consumer`, and the SSH rewrite. Every new assertion was shown to fail against a deliberately broken updater.
+
+- **docs: private upstreams and fail-closed coupling.** `docs/AUTOMATIC_SYNC.md` now states that a private upstream belongs only in private consumers, and that in scheduled and manual runs a failing declared upstream or a malformed `sources` value also holds back the built-in kits, with recovery steps.
+
 - **No process the kit starts can open a console window.** A daemon running under `pythonw` proved
   its private companion on every log line. Each proof ran about 19 git commands through
   `data_boundary.py`, none of them asked for a hidden console, and a process with no console hands
