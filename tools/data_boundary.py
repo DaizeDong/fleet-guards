@@ -986,6 +986,138 @@ def read_private_companion_git(proof, *arguments):
     return result
 
 
+# ------------------------------------------------- live visibility through the gh CLI, any account
+# WHY THIS EXISTS. Consumers that confirm a receipt with a live `gh repo view OWNER/NAME` used to
+# ask with whatever account gh had ACTIVE. gh keeps one active account per host for the whole
+# machine, and any session may run `gh auth switch`. On 2026-10-09 another session switched the
+# active account to one that cannot see the private companion, and every reminder tick failed
+# closed with "PRIVATE repository proof unavailable" until someone switched it back. The proof
+# was asking "can the active account see it", which is not the question.
+#
+# Visibility is a property of the repository, not of the account asking. Any logged-in account
+# that can see the repository gets the same authoritative answer, so this asks with each one in
+# turn: the account named like the owner first (the likely one, and one keyring read), then every
+# other logged-in account, then whatever gh would use by default (an explicit GH_TOKEN, or the
+# active account). The token is borrowed for one child process through GH_TOKEN; gh's global
+# active account is never read or changed, and no token is ever printed, logged or put in an
+# error. Only an answer whose nameWithOwner names the requested repository counts. If no
+# candidate can answer, the result is an exception, never a guess.
+_GH_TOKEN_ENV = {"gh_token", "github_token", "gh_enterprise_token", "github_enterprise_token", "gh_host"}
+_GH_REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
+_GH_LOGGED_IN = re.compile(r"Logged in to github\.com (?:account|as) ([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\b")
+_GH_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
+
+
+def _gh_environment(token=None, ambient=False):
+    """A child environment that selects exactly one credential, or gh's own default."""
+    if ambient:
+        environment = dict(os.environ)
+    else:
+        environment = {key: value for key, value in os.environ.items()
+                       if key.casefold() not in _GH_TOKEN_ENV}
+    environment.update(GH_HOST="github.com", GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1")
+    if token is not None:
+        environment["GH_TOKEN"] = token
+    return environment
+
+
+def _gh_capture(gh, arguments, environment, timeout):
+    """Run gh and return (status, stdout); None when it could not run at all."""
+    try:
+        result = subprocess.run([gh, *arguments], capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", env=environment, timeout=timeout,
+                                stdin=subprocess.DEVNULL, **_no_window())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return result.returncode, result.stdout
+
+
+def _gh_logged_in_accounts(gh, timeout):
+    """Logins gh holds for github.com in its own store; ambient tokens are excluded on purpose."""
+    captured = _gh_capture(gh, ["auth", "status", "--hostname", "github.com"],
+                           _gh_environment(), timeout)
+    if captured is None:
+        return []
+    # gh exits nonzero when any stored account fails validation; the others are still listed.
+    accounts = []
+    for login in _GH_LOGGED_IN.findall(captured[1]):
+        if login.casefold() not in {account.casefold() for account in accounts}:
+            accounts.append(login)
+    return accounts
+
+
+def _gh_account_token(gh, login, timeout):
+    captured = _gh_capture(gh, ["auth", "token", "--hostname", "github.com", "--user", login],
+                           _gh_environment(), timeout)
+    if captured is None or captured[0] != 0:
+        return None
+    token = captured[1].strip()
+    if not token or any(character.isspace() or ord(character) < 33 for character in token):
+        return None
+    return token
+
+
+def _gh_visibility_answer(gh, repository, environment, timeout):
+    captured = _gh_capture(gh, ["repo", "view", repository, "--json", "nameWithOwner,visibility"],
+                           environment, timeout)
+    if captured is None or captured[0] != 0:
+        return None
+    try:
+        response = json.loads(captured[1])
+    except ValueError:
+        return None
+    if (not isinstance(response, dict) or not isinstance(response.get("nameWithOwner"), str)
+            or response["nameWithOwner"].casefold() != repository.casefold()
+            or response.get("visibility") not in {"PRIVATE", "PUBLIC", "INTERNAL"}):
+        return None
+    return response["visibility"]
+
+
+def query_github_visibility(repository, *, timeout=20):
+    """Return GitHub's visibility for OWNER/NAME ("PRIVATE", "PUBLIC" or "INTERNAL").
+
+    Independent of which gh account is active: asks with the owner's stored account, then every
+    other stored account, then gh's default credential, and returns the first answer that names
+    the requested repository. Raises GitError when no candidate can see it. Never prints a token.
+    """
+    import shutil
+
+    if (not isinstance(repository, str) or not _GH_REPOSITORY.fullmatch(repository)
+            or repository.split("/")[1] in {".", ".."}):
+        raise GitError("Repository visibility requires a canonical OWNER/NAME")
+    gh = shutil.which("gh")
+    if not gh or not os.path.isabs(gh):
+        raise GitError("Repository visibility is unavailable: the gh CLI is not installed")
+    owner = repository.split("/")[0]
+    tried = set()
+    attempts = 0
+
+    def ask(login):
+        nonlocal attempts
+        tried.add(login.casefold())
+        token = _gh_account_token(gh, login, timeout)
+        if token is None:
+            return None
+        attempts += 1
+        return _gh_visibility_answer(gh, repository, _gh_environment(token), timeout)
+
+    if _GH_LOGIN.fullmatch(owner):
+        answer = ask(owner)
+        if answer is not None:
+            return answer
+    for login in _gh_logged_in_accounts(gh, timeout):
+        if login.casefold() not in tried:
+            answer = ask(login)
+            if answer is not None:
+                return answer
+    attempts += 1
+    answer = _gh_visibility_answer(gh, repository, _gh_environment(ambient=True), timeout)
+    if answer is not None:
+        return answer
+    raise GitError("Repository visibility is unavailable: no gh credential can see the repository "
+                   "(%d credential(s) asked)" % attempts)
+
+
 _HTTPS_PERFORMANCE_KEYS = {
     "version", "maxrequests", "minsessions", "postbuffer", "lowspeedlimit",
     "lowspeedtime", "keepaliveidle", "keepaliveinterval", "keepalivecount",
