@@ -22,6 +22,8 @@ jobs:
     # Each key is "owner/repo"; "workflow" is the upstream's gate workflow file and "branch" the
     # branch it publishes from. The matching .gitmodules entry must name the same branch (a
     # missing branch means main), and FLEET_SYNC_TOKEN must be able to read the upstream.
+    # Declare a private upstream only in a private consumer: a public one exposes its name in
+    # .gitmodules, in this file and in the Actions logs.
     # with:
     #   sources: '{"example/upstream": {"workflow": "ci.yml", "branch": "master"}}'
     secrets:
