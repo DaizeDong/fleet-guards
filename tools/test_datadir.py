@@ -160,8 +160,8 @@ def test_source3_worktree_config_cannot_override_companion_proof(tmp_path, linke
 def _clean_env(monkeypatch):
     for v in ("DEMO_DATA_DIR", "DEMO_CONFIG", "DEMO_CONFIG_DIR"):
         monkeypatch.delenv(v, raising=False)
-    # HOME is read for the dotfile fallbacks; point it somewhere empty so a real machine's
-    # ~/.demo-config cannot make a test pass or fail by accident.
+    # HOME is isolated anyway: no home dotfile may ever be read, and a test that put one there
+    # (test_a_home_dotfile_is_not_a_companion) must not be confused by a real machine's.
     yield
 
 
@@ -219,16 +219,18 @@ def test_config_dir_alias_is_honored(monkeypatch, tmp_path):
     assert str(dd.resolve_data_dir("demo")) == str(cfg / "data")
 
 
-def test_dotfile_companion_still_works(monkeypatch, tmp_path):
+def test_a_home_dotfile_is_not_a_companion(monkeypatch, tmp_path):
+    """2026-10-12: ~/.<skill>-config and ~/.<skill>-data are no longer probed. A reader sees an
+    uninitialized tool; a writer gets the instructions to set up a real companion."""
     home = _isolate_home(monkeypatch, tmp_path)
     (home / ".demo-config" / "data").mkdir(parents=True)
-    assert str(dd.resolve_data_dir("demo")) == str(home / ".demo-config" / "data")
-
-
-def test_standalone_dotfile_is_the_last_resort(monkeypatch, tmp_path):
-    home = _isolate_home(monkeypatch, tmp_path)
     (home / ".demo-data").mkdir(parents=True)
-    assert str(dd.resolve_data_dir("demo")) == str(home / ".demo-data")
+    assert dd.resolve_data_dir("demo") is None
+    assert dd.resolve_companion_root("demo") is None
+    with pytest.raises(dd.DataDirNotInitialized) as e:
+        dd.data_path("demo", "metrics/live-runs.jsonl")
+    assert "demo-config" in str(e.value) and "PRIVATE" in str(e.value)
+    assert "mkdir -p ~/" not in str(e.value)
 
 
 def test_data_path_raises_with_instructions_not_a_repo_fallback(monkeypatch, tmp_path):
@@ -239,6 +241,7 @@ def test_data_path_raises_with_instructions_not_a_repo_fallback(monkeypatch, tmp
     msg = str(e.value)
     assert "DEMO_CONFIG" in msg and "DEMO_DATA_DIR" in msg
     assert "NEVER goes back into THIS repo" in msg
+    assert "beside this one as demo-config" in msg, "the message must say how to initialize"
 
 
 # --- the narrow refusal --------------------------------------------------------------------------
@@ -470,9 +473,8 @@ def test_real_git_linked_consumer_with_submodule(tmp_path, monkeypatch):
 #
 # The check is deliberately narrow. Only the CONVENTION path is proven, because only it is DERIVED
 # -- the sibling of whatever worktree this file sits in, a location unrelated work can come to
-# occupy. A `~/.<skill>-config` dotfile is somebody's deliberate mkdir and is treated as intent;
-# companions of that shape are not always git repos, so demanding proof there would break them
-# to fix a hole they are not in.
+# occupy. Environment variables are somebody's explicit intent and need no proof. (Home dotfiles
+# used to be treated as intent too; they are not probed at all since 2026-10-12.)
 
 def _fake_sibling_layout(monkeypatch, tmp_path):
     """Put the module in a worktree so `_convention_roots` resolves to tmp_path/<skill>-config."""
@@ -538,29 +540,26 @@ def test_marker_naming_another_skill_is_not_proof(monkeypatch, tmp_path):
         dd.resolve_data_dir("demo")
 
 
-def test_a_proven_companion_later_in_the_order_beats_a_stray_earlier(monkeypatch, tmp_path):
-    """The stray is SKIPPED, not fatal, so a working setup keeps working.
-
-    Raising on the first unproven directory would have been the simpler rule and the wrong one: a
-    stray at the convention path would then break a skill whose real companion is its dotfile, and
-    a gate that breaks working setups gets disabled rather than satisfied.
-    """
-    home = _isolate_home(monkeypatch, tmp_path)
+def test_an_explicit_companion_beats_a_stray_at_the_convention_path(monkeypatch, tmp_path):
+    """The env var comes first in the order, so a stray at the convention path never gets a say."""
+    _isolate_home(monkeypatch, tmp_path)
     stray = _fake_sibling_layout(monkeypatch, tmp_path)
     stray.mkdir()
-    real = home / ".demo-config"
+    real = tmp_path / "pinned-config"
     real.mkdir()
+    monkeypatch.setenv("DEMO_CONFIG", str(real))
     assert str(dd.resolve_data_dir("demo")) == str(real)
 
 
-def test_dotfile_needs_no_proof(monkeypatch, tmp_path):
-    """A companion of this shape need not be a git repo, so demanding proof here would break it
-    to close a hole it is not in."""
+def test_a_home_dotfile_does_not_rescue_a_stray(monkeypatch, tmp_path):
+    """With a stray at the convention path and only a home dotfile otherwise, the answer is the
+    refusal, not the dotfile: the dotfile is not a companion."""
     home = _isolate_home(monkeypatch, tmp_path)
-    _fake_sibling_layout(monkeypatch, tmp_path)   # convention path exists as a concept, not on disk
-    d = home / ".demo-config"
-    d.mkdir()
-    assert str(dd.resolve_data_dir("demo")) == str(d)
+    stray = _fake_sibling_layout(monkeypatch, tmp_path)
+    stray.mkdir()
+    (home / ".demo-config").mkdir()
+    with pytest.raises(dd.CompanionUnproven):
+        dd.resolve_data_dir("demo")
 
 
 def test_explicit_env_override_needs_no_proof(monkeypatch, tmp_path):
@@ -592,3 +591,21 @@ def test_source2_real_git_linked_companion_convention(monkeypatch, tmp_path):
     resolver = load(str(consumer / "tools/datadir.py"), "linked_companion_resolver")
     assert Path(resolver.resolve_data_dir("demo")).resolve() == (linked / "data").resolve()
     assert Path(resolver.resolve_companion_root("demo")).resolve() == linked.resolve()
+
+
+def test_create_without_initialized_companion_requires_explicit_destination(monkeypatch, tmp_path):
+    """create=True is a WRITE: with no companion it raises, and it never mkdirs a home dotfile."""
+    home = _isolate_home(monkeypatch, tmp_path)
+    _fake_sibling_layout(monkeypatch, tmp_path)
+    with pytest.raises(dd.DataDirNotInitialized):
+        dd.resolve_data_dir("demo", create=True)
+    assert not (home / ".demo-config").exists()
+    assert not (home / ".demo-data").exists()
+
+
+def test_explicit_create_keeps_operator_selected_destination(monkeypatch, tmp_path):
+    _isolate_home(monkeypatch, tmp_path)
+    selected = tmp_path / "explicit-demo-config"
+    monkeypatch.setenv("DEMO_CONFIG", str(selected))
+    assert dd.resolve_data_dir("demo", create=True) == selected / "data"
+    assert (selected / "data").is_dir()

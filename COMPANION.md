@@ -30,8 +30,12 @@ directory. Discovery proves the companion identity described below; it does not 
 | 1 | `$<SKILL>_DATA_DIR` | the data directory itself, not a repo root |
 | 2 | `$<SKILL>_CONFIG/data`, then `$<SKILL>_CONFIG` | also `$<SKILL>_CONFIG_DIR` |
 | 3 | `<sibling>/data`, then `<sibling>` | **the convention**: a directory named `<skill>-config` beside this repository |
-| 4 | `~/.<skill>-config/data`, then `~/.<skill>-config` | dotfile in the home directory |
-| 5 | `~/.<skill>-data` | last resort |
+
+There is no home-directory location. `~/.<skill>-config` and `~/.<skill>-data` were probed until
+2026-10-12 and are not any more: a directory in the home folder is not a repository, so nothing
+versioned, backed up or pushed what a skill wrote there. A machine with neither a variable nor a
+sibling companion is uninitialized; readers report that, and writers raise `DataDirNotInitialized`
+with how to create the companion.
 
 Two properties of this list are load bearing and were each added after a measured failure.
 
@@ -66,7 +70,7 @@ precisely the leak this whole boundary exists to prevent.
   companion is exactly where a person's real output legitimately lives, with a history, a diff and
   a backup. The rule is "DATA never in a PUBLIC repo", not "DATA never in git", and conflating the
   two has already produced one wrong verdict in this fleet.
-- The normal layout is **beside this repository**, named `<skill>-config`. The discovery table also supports explicit environment variables and the documented home-directory locations; no location inside public source is permitted.
+- The normal layout is **beside this repository**, named `<skill>-config`. The discovery table also supports explicit environment variables; there is no home-directory location, and no location inside public source is permitted.
 - It must **prove it is the companion**, and a directory that merely sits at the right path does
   not qualify. `is_dir()` was the whole test once, so anything created at a candidate path won:
   a scratch directory made during unrelated work, an empty folder left by a failed run, a

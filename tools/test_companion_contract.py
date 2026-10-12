@@ -117,9 +117,9 @@ def main():
     text = io.open(DOC, encoding="utf-8").read()
 
     print("A. the table names every location the resolver probes")
-    for needed in ("$<SKILL>_DATA_DIR", "$<SKILL>_CONFIG", "_CONFIG_DIR",
-                   "<skill>-config", "~/.<skill>-config", "~/.<skill>-data"):
+    for needed in ("$<SKILL>_DATA_DIR", "$<SKILL>_CONFIG", "_CONFIG_DIR", "<skill>-config"):
         check("names %s" % needed, needed in text)
+    check("says there is no home-directory location", "There is no home-directory location" in text)
 
     print("\nB. each documented location resolves")
     cases = [
@@ -139,14 +139,6 @@ def main():
          lambda t, h, r: _companion(os.path.join(r, SKILL + "-config")),
          lambda t: {},
          lambda t, r: os.path.join(r, SKILL + "-config")),
-        ("home dotfile config/data",
-         lambda t, h, r: os.makedirs(os.path.join(h, "." + SKILL + "-config", "data"), exist_ok=True),
-         lambda t: {},
-         lambda t, r: os.path.join(t, "home", "." + SKILL + "-config", "data")),
-        ("home dotfile data",
-         lambda t, h, r: os.makedirs(os.path.join(h, "." + SKILL + "-data"), exist_ok=True),
-         lambda t: {},
-         lambda t, r: os.path.join(t, "home", "." + SKILL + "-data")),
     ]
     for label, make, envf, want in cases:
         tmp = tempfile.mkdtemp()
@@ -186,13 +178,12 @@ def main():
           raised is not None and type(raised).__name__ == "CompanionUnproven",
           "raised=%r returned=%r" % (raised, got))
 
-    print("\nC. the documented PRIORITY, by shadowing")
+    print("\nC. a home dotfile is never a companion")
     got, tmp, home, repos = _case(lambda t, h, r: (
-        os.makedirs(os.path.join(_companion(os.path.join(r, SKILL + "-config")), "data"), exist_ok=True),
-        os.makedirs(os.path.join(h, "." + SKILL + "-config", "data"), exist_ok=True)), {})
+        os.makedirs(os.path.join(h, "." + SKILL + "-config", "data"), exist_ok=True),
+        os.makedirs(os.path.join(h, "." + SKILL + "-data"), exist_ok=True)), {})
     try:
-        check("the sibling beats the home dotfile",
-              got is not None and ".%s-config" % SKILL not in str(got), "got %s" % got)
+        check("home dotfiles alone resolve to None", got is None, "got %s" % got)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

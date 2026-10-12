@@ -18,10 +18,17 @@ Discovery order (first existing wins):
   1. $<SKILL>_DATA_DIR                       explicit override / hot-swap
   2. $<SKILL>_CONFIG / $<SKILL>_CONFIG_DIR   the PRIVATE COMPANION REPO, wherever it is pinned:
                                              <config>/data/ when that exists, else <config> itself
-  3. ~/.<skill>-config/data/                 the same companion repo at its default dotfile path
-  4. ~/.<skill>-data/                        standalone fallback
-  5. None                                    -> the tool is UNINITIALIZED, which is exactly what a
+  3. <sibling>/data/, then <sibling>         the convention: the companion repo beside this one,
+                                             named <skill>-config, proven by its remote or marker
+  4. None                                    -> the tool is UNINITIALIZED, which is exactly what a
                                                 freshly cloned public skill SHOULD be
+
+NO HOME-DIRECTORY FALLBACK (removed 2026-10-12)
+-----------------------------------------------
+Steps 3 and 4 used to be ~/.<skill>-config and ~/.<skill>-data. A directory in the home folder is
+not a repository: nothing versions it, backs it up or pushes it, so a skill that found one wrote
+its only record of real runs to the one place on the machine with no history. Readers still
+degrade to "uninitialized" (None); writers raise DataDirNotInitialized with what to set up.
 
 WHY STEP 2 EXISTS (added 2026-07-31)
 ------------------------------------
@@ -204,7 +211,7 @@ def _convention_roots(skill, *, source_root=None):
     absolute location differs per machine, and a home-anchored literal in a public repo is
     exactly what pii_guard blocks. When this file is NOT inside a worktree (the canonical copy
     under the scripts directory), there is no sibling to infer and this contributes nothing;
-    resolution then falls back to the env vars and dotfiles as before.
+    only the env vars can then name the companion.
     """
     root = _source_root(source_root)
     if root is None:
@@ -353,9 +360,7 @@ def _candidates(skill, *, source_root=None):
     """Discovery order, as (Path, explicit) pairs. See the module docstring.
 
     `explicit` marks a path that carries the operator's INTENT on its face: an environment
-    variable they set, or a hidden directory named exactly `.<skill>-config`, which nothing
-    creates by accident. Those are taken on
-    trust: someone who types a path has already supplied the intent that the proof below stands in
+    variable they set. That is taken on trust: someone who types a path has already supplied the intent that the proof below stands in
     for, and demanding a marker there would break every deliberate override for no safety gain.
     The CONVENTION path is different in kind and that is why it alone is checked. This module
     DERIVES it -- the sibling of whatever worktree the file happens to sit in -- so an
@@ -377,21 +382,12 @@ def _candidates(skill, *, source_root=None):
         # which is what every consumer of this function is actually asking.
         out.append((root / "data", True))
         out.append((root, True))
-    # The convention comes BEFORE the dotfiles: when a skill has a real companion repo beside it,
-    # that repo is the answer, and a leftover dotfile must not shadow it. It comes AFTER the env
-    # vars so an explicit override still wins.
+    # The convention comes AFTER the env vars so an explicit override still wins. Nothing comes
+    # after it: the home-directory dotfiles that used to were removed on 2026-10-12 (see the module
+    # docstring), so an uninitialized machine answers None instead of a path nothing backs up.
     for root in _convention_roots(skill, source_root=source_root):
         out.append((root / "data", False))
         out.append((root, False))
-    dot = Path(os.path.expanduser("~/.%s-config" % skill))
-    out.append((dot / "data", True))
-    # The dotfile ROOT, not just its data/ subdir. Companion repos are already probed both ways
-    # a few lines up; the dotfile shape was only probed one way, so a skill that files output
-    # directly at the root answered "uninitialized" while its files sat right there. email-monitor
-    # is that shape (153 tracked files, its own private remote, and its CONFIG.md documents this
-    # exact path as the third discovery step) and it read as having no data at all until 2026-08-20.
-    out.append((dot, True))
-    out.append((Path(os.path.expanduser("~/.%s-data" % skill)), True))
     return out
 
 
@@ -484,13 +480,14 @@ def data_path(skill, relpath, create=False, *, source_root=None):
         raise DataDirNotInitialized(
             "%s has no private data directory, so it has nowhere to put real-run output.\n"
             "This is the correct state for a freshly cloned public skill: it ships as an\n"
-            "uninitialized tool. Point it at your PRIVATE COMPANION repo:\n"
-            "    set %s to the companion repo (data/ under it is used when present)\n"
-            "    or mkdir -p ~/.%s-config/data\n"
+            "uninitialized tool. Initialize its PRIVATE COMPANION repo first:\n"
+            "    create a PRIVATE repository with an origin and clone it beside this one as %s-config\n"
+            "    or set %s to the companion repo (data/ under it is used when present)\n"
             "    or set %s to an explicit private directory\n"
+            "A directory in the home folder is not a companion: nothing versions or backs it up.\n"
             "Real-run output NEVER goes back into THIS repo -- this repo carries only the schema\n"
             "(<file>.example) and a synthetic fixture set."
-            % (skill, _config_env_vars(skill)[0], skill, _env_var(skill)))
+            % (skill, skill, _config_env_vars(skill)[0], _env_var(skill)))
     p = base / relpath
     _reject_if_inside_own_repo(p, skill, source_root=source_root)
     try:
@@ -538,9 +535,10 @@ def _cli(argv=None):
 
 def _raise(skill):
     raise DataDirNotInitialized(
-        "%s has no private data directory.\n    set %s to the private companion repo\n"
-        "    or mkdir -p ~/.%s-config/data\n    (or set %s)"
-        % (skill, _config_env_vars(skill)[0], skill, _env_var(skill)))
+        "%s has no private data directory.\n"
+        "    create a PRIVATE repository with an origin and clone it beside this one as %s-config\n"
+        "    or set %s to the private companion repo\n    (or set %s)"
+        % (skill, skill, _config_env_vars(skill)[0], _env_var(skill)))
 
 
 if __name__ == "__main__":
