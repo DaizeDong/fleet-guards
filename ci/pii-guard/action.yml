@@ -83,7 +83,7 @@ runs:
           echo "::error::the guards submodule has no test_https_transport.py"; exit 1; }
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_https_transport.py" -q
 
-    - name: Storage admission tests (are writes declared and versionable?)
+    - name: Storage contract tests (are artifacts declared and paths canonical?)
       shell: bash
       run: |
         python -m pytest "$GITHUB_ACTION_PATH/../../tools/test_storage_contract.py" -q

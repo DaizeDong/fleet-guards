@@ -1,4 +1,7 @@
-"""Consumer-bound access to the canonical companion and PRIVATE admission tools."""
+"""Consumer-bound access to the canonical companion resolver and visibility query.
+
+PRIVATE publication is enforced at commit time by the hooks and CI, not by a runtime proof.
+"""
 from dataclasses import dataclass
 import importlib.util
 from pathlib import Path
@@ -67,18 +70,7 @@ def companion_resolver(*, source_root):
     return CompanionResolver(source_root)
 
 
-def prove_private_companion(destination, *, visibility_map=None):
-    """Check current effective Git routes using the canonical PRIVATE proof implementation."""
-    return _canonical("data_boundary").prove_private_companion(
-        destination, visibility_map=visibility_map)
-
-
 def query_github_visibility(repository, *, timeout=20):
     """Ask GitHub for OWNER/NAME's visibility with any logged-in gh account, never the active one alone."""
     return _canonical("data_boundary").query_github_visibility(repository, timeout=timeout)
 
-
-def authorize_artifact_write(source_root, companion_root, relative_path, **options):
-    """Apply the canonical source contract and current PRIVATE admission before a write."""
-    return _canonical("storage_contract").authorize_artifact_write(
-        source_root, companion_root, relative_path, **options)

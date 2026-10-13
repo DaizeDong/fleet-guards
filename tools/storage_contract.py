@@ -1,18 +1,16 @@
-"""Canonical source storage contracts and read-only write admission.
+"""Canonical source storage contracts: schema validation and path ownership.
 
 Inventory/retirement orchestration belongs to consumers. This module neither
 creates directories nor writes data, Git configuration, receipts, or indexes.
+The companion's PRIVATE publication is enforced at commit time, not here.
 """
 import fnmatch
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import stat
-import sys
-from typing import NamedTuple
 
 CONTRACT = "storage.contract.json"
 FIELDS = ("artifact_id", "path_pattern", "purpose", "schema", "producer",
@@ -148,133 +146,3 @@ def owners(contract, path):
 
 def canonical_hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-class ArtifactWriteAdmission(NamedTuple):
-    """Immutable admission snapshot; call again immediately before each write."""
-
-    path: Path
-    artifact_id: str
-    contract_sha256: str
-    proof: object
-
-
-def load_boundary():
-    """Load only the boundary API shipped next to this contract implementation."""
-    path = Path(__file__).resolve().with_name("data_boundary.py")
-    name = "_fleet_storage_boundary_" + hashlib.sha256(str(path).encode()).hexdigest()
-    for key in ("data_boundary", name):
-        module = sys.modules.get(key)
-        filename = getattr(module, "__file__", None)
-        if filename and Path(filename).resolve() == path:
-            return module
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ValueError("required pinned data_boundary module is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except (OSError, ImportError):
-        sys.modules.pop(name, None)
-        raise
-    return module
-
-
-def _root_path(value):
-    path = Path(value)
-    if ".." in path.parts:
-        raise ValueError("storage roots must not contain traversal components")
-    path = no_links(path)
-    if not path.is_dir():
-        raise ValueError("storage root must be an existing directory")
-    return path.resolve()
-
-
-def _destination(root, relative, directory):
-    """Reject aliases and nested repositories without creating absent ancestors."""
-    target = root / relative
-    no_links(target, allow_missing=True)
-    node = root
-    for component in Path(relative).parts:
-        node = node / component
-        try:
-            info = node.lstat()
-        except FileNotFoundError:
-            break
-        if os.name == "nt" and str(node.resolve(strict=True)) != str(node):
-            raise ValueError("noncanonical filesystem alias refuses artifact write")
-        if stat.S_ISDIR(info.st_mode):
-            try:
-                (node / ".git").lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                raise ValueError("nested repository refuses artifact write")
-            if node == target and not directory:
-                raise ValueError("file artifact destination is a directory")
-        elif stat.S_ISREG(info.st_mode):
-            if info.st_nlink != 1:
-                raise ValueError("hardlinked artifact destination refused")
-            if node != target or directory:
-                raise ValueError("artifact directory path contains a file")
-        else:
-            raise ValueError("artifact destination is not an ordinary file or directory")
-    return target
-
-
-def authorize_artifact_write(source_root, companion_root, relative_path, *,
-                             artifact_id=None, directory=False, visibility_map=None):
-    """Admit one declared artifact in a current, versioned PRIVATE worktree.
-
-    The relative path is anchored to the exact companion root, not a discovered
-    DATA directory. An expected artifact_id binds a producer to its declaration.
-    Only source-declared transient artifacts may be ignored. Admission does not
-    write, stage, commit, or lock anything; consumers own atomic writes and must
-    keep this fresh check adjacent to them. Directory admission covers that
-    directory itself, never arbitrary future children.
-    """
-    relative = _relative_path(relative_path)
-    if type(directory) is not bool:
-        raise ValueError("directory must be a boolean")
-    source, root = _root_path(source_root), _root_path(companion_root)
-    contract = validate_contract(source)
-    digest = canonical_hash(contract)
-    if contract.get("layout", SEPARATE) == COMBINED:
-        if source != root:
-            raise ValueError("combined_private_repo requires the same source and companion root")
-    elif source == root or source.is_relative_to(root) or root.is_relative_to(source):
-        raise ValueError("companion must be a separate PRIVATE worktree")
-    if not in_data_scope(contract, relative):
-        raise ValueError("artifact is outside declared data_roots")
-    found = owners(contract, relative)
-    if len(found) != 1:
-        raise ValueError("artifact must have exactly one owner; undeclared or ambiguous path: " + relative)
-    artifact = found[0]
-    if artifact_id is not None and artifact["artifact_id"] != artifact_id:
-        raise ValueError("destination belongs to a different producer artifact")
-    if artifact["retention_rule"]["class"] == "retired":
-        raise ValueError("retired artifacts cannot receive new writes")
-    target = _destination(root, relative, directory)
-    boundary = load_boundary()
-    proof = boundary.prove_private_companion(root, visibility_map)
-    if Path(proof.root).resolve() != root:
-        raise ValueError("companion must name the exact proven worktree root")
-    boundary.read_private_companion_git(proof, "rev-parse", "--verify", "HEAD")
-
-    def check_ignore(current):
-        result = boundary.read_private_companion_git(
-            current, "check-ignore", "--no-index", "-q", "--", relative + ("/" if directory else ""))
-        if result.returncode == 0 and artifact.get("persistence", "versioned") != "transient":
-            raise ValueError("versioned artifact destination is ignored: " + relative)
-
-    check_ignore(proof)
-    current = boundary.prove_private_companion(root, visibility_map)
-    if (current.root, current.repositories, current.signature) != (
-            proof.root, proof.repositories, proof.signature):
-        raise boundary.GitError("Companion publication state changed during write admission")
-    if canonical_hash(validate_contract(source)) != digest:
-        raise ValueError("source storage contract changed during write admission")
-    _destination(root, relative, directory)
-    check_ignore(current)
-    return ArtifactWriteAdmission(target, artifact["artifact_id"], digest, current)

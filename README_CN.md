@@ -3,7 +3,7 @@
 Git 仓库共用的发布检查套件，提供九条检测规则、数据边界和检查缺失时阻断操作的钩子。消费仓通过 Git submodule 固定使用的版本。
 
 Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACKAGE.md)。包版本 0.2.1 将现有
-解析器与 PRIVATE 准入实现映射进 wheel；消费方显式提供自己的根目录，源码里只保留一份实现。
+伴生仓解析器映射进 wheel；消费方显式提供自己的根目录，源码里只保留一份实现。
 
 [![守卫套件](https://img.shields.io/badge/%E5%AE%88%E5%8D%AB%E5%A5%97%E4%BB%B6-Git%20%E5%AD%90%E6%A8%A1%E5%9D%97-orange?style=flat)](#安装)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

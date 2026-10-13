@@ -1675,33 +1675,6 @@ def storage_literal_path_cases():
     }
 
 
-def make_storage_short_name_fixture(layout, kind):
-    """Construct NTFS aliases without reading or writing a real repository's files."""
-    import ctypes
-    companion = layout["companion"]
-    if kind == "gitfile":
-        root = companion.root.parent / "linked-companion"
-        companion.git("worktree", "add", "--detach", str(root))
-        target = root / ".git"
-    else:
-        root = companion.root
-        target = root / "reports" / "long-synthetic-status-filename.json"
-        target.parent.mkdir()
-        target.write_text("{}\n", encoding="utf-8")
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    get_short = kernel.GetShortPathNameW
-    get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
-    get_short.restype = ctypes.c_uint32
-    needed = get_short(str(target), None, 0)
-    if not needed:
-        raise ctypes.WinError(ctypes.get_last_error())
-    buffer = ctypes.create_unicode_buffer(needed)
-    if not get_short(str(target), buffer, needed):
-        raise ctypes.WinError(ctypes.get_last_error())
-    alias = target.with_name(Path(buffer.value).name)
-    return root, target, alias.relative_to(root).as_posix()
-
-
 # ------------------------------------------------- a synthetic gh CLI for the visibility query
 GH_STUB_PROGRAM = r'''
 import json, os, sys

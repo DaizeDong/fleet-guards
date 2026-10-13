@@ -931,8 +931,8 @@ def prove_private_companion(destination, visibility_map=None):
 
     Local built-in Git discovery/configuration reads precede transport attestation.
     This delegates to the same physical/effective policy as the companion audit;
-    it never invokes SSH, a remote helper, or a network operation. Callers must
-    repeat the proof before writing: a snapshot is not a filesystem lock.
+    it never invokes SSH, a remote helper, or a network operation. The commit-time
+    publication guard and the companion audit use it; it is not a write-time check.
     """
     from types import MappingProxyType
 

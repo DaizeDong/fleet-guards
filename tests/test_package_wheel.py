@@ -60,8 +60,8 @@ for name in ("UnsafePathError", "FileTooLargeError", "atomic_replace", "create_n
              "sync_directory", "validate_path", "exclude_file_writes", "delete_if_identity_matches"):
     assert callable(getattr(filesystem, name))
 assert secrets.scan("", max_text_chars=16 * 1024 * 1024, seconds=30)["state"] == "clean"
-from fleet_guards.runtime import companion_resolver, prove_private_companion, authorize_artifact_write
-source, companion, receipt = map(pathlib.Path, sys.argv[2:5])
+from fleet_guards.runtime import companion_resolver
+source, companion = map(pathlib.Path, sys.argv[2:4])
 os.environ['SYNTHETIC_TOOL_CONFIG'] = str(companion)
 resolver = companion_resolver(source_root=source)
 assert resolver.resolve_companion_root('synthetic-tool') == companion
@@ -72,29 +72,9 @@ except RuntimeError as error:
     assert 'INSIDE' in str(error)
 else:
     raise AssertionError('consumer source was accepted as DATA')
-proof = prove_private_companion(companion, visibility_map=receipt)
-assert proof.repositories == ('example-owner/synthetic-private',)
-admission = authorize_artifact_write(source, companion, 'reports/status.json', visibility_map=receipt)
-assert admission.artifact_id == 'status'
-assert not admission.path.exists()
-try:
-    authorize_artifact_write(source, companion, 'undeclared.json', visibility_map=receipt)
-except ValueError:
-    pass
-else:
-    raise AssertionError('undeclared artifact was authorized')
-try:
-    prove_private_companion(companion, visibility_map=receipt.with_name('absent.json'))
-except RuntimeError:
-    pass
-else:
-    raise AssertionError('missing PRIVATE proof was accepted')
-print(json.dumps({"version": fleet_guards.__version__, "isolated_import": True,
-                  "private_admission": True}))
+print(json.dumps({"version": fleet_guards.__version__, "isolated_import": True}))
 '''
     layout = make_storage_contract_fixture(tmp_path / "layout", pii_guard._utcnow())
     result = run("-I", "-c", probe, str(target), str(layout['source'].root),
-                 str(layout['companion'].root), str(layout['receipt']),
-                 cwd=tmp_path, env=layout['companion'].env)
-    assert json.loads(result.stdout) == {"version": "0.2.1", "isolated_import": True,
-                                        "private_admission": True}
+                 str(layout['companion'].root), cwd=tmp_path, env=layout['companion'].env)
+    assert json.loads(result.stdout) == {"version": "0.2.1", "isolated_import": True}

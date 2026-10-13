@@ -21,7 +21,7 @@ which is the single home for that reasoning, and what changed lives in `CHANGELO
   to resolve a data directory that sits inside the skill's own repository (`tools/datadir.py`).
 - The companion contract, checked against the resolver by construction rather than by reading
   (`COMPANION.md`, `tools/test_companion_contract.py`).
-- Source-owned storage validation and read-only artifact write admission
+- Source-owned storage contract validation and path matching
   (`tools/storage_contract.py`, `docs/STORAGE_CONTRACT.md`).
 - Commit and push gates, fail closed on a missing scanner, a missing interpreter and a comparison
   that cannot prove it runs (`hooks/pre-commit`, `hooks/pre-push`).

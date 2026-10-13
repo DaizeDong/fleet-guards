@@ -4,8 +4,8 @@ Version 0.2.1 packages the credential scanner, filesystem primitives and canonic
 Python consumers. Install a wheel built from an accepted source revision and
 record both the revision and wheel hash in the deployment lock.
 
-`fleet_guards.runtime` exposes the existing resolver and PRIVATE admission
-implementations. The wheel maps four canonical `tools/` modules into an internal
+`fleet_guards.runtime` exposes the existing companion resolver and the live
+visibility query. The wheel maps four canonical `tools/` modules into an internal
 namespace at build time; their bytes match the source files. There is no second
 resolver implementation. Source toolkit calls keep their existing discovery
 context, while package callers must supply their own source or installation root.
@@ -13,10 +13,10 @@ The older `fleet_guards.datadir` and `_datadir` module names remain absent.
 Importing the package or its CLI does not load the resolver. Git hooks and
 publication policy retain their existing paths.
 
-## Companion discovery and write admission
+## Companion discovery
 
 ```python
-from fleet_guards.runtime import companion_resolver, authorize_artifact_write
+from fleet_guards.runtime import companion_resolver
 
 resolver = companion_resolver(source_root=absolute_consumer_root)
 companion = resolver.resolve_companion_root("example-tool")
@@ -26,16 +26,9 @@ data = resolver.resolve_data_dir("example-tool")
 The bound root controls sibling discovery and own-source exclusion. It must be
 absolute, and each resolver retains its own immutable binding. Existing source
 toolkit calls without `source_root` still derive the consumer above a Guards
-submodule. Discovery identifies a location; it does not establish PRIVATE
-transport authority or artifact ownership.
-
-`prove_private_companion(destination, visibility_map=...)` exposes the current
-physical and effective Git-route proof. `authorize_artifact_write(source_root,
-companion_root, relative_path, **options)` applies the canonical storage contract,
-path checks, current PRIVATE proof and ignore checks described in
-[STORAGE_CONTRACT.md](docs/STORAGE_CONTRACT.md). Both remain read-only, and neither
-proof is a filesystem lock. Repeat admission before a write. The wheel includes
-the proof's visibility-receipt dependency, and missing or stale proof fails closed.
+submodule. Discovery identifies a location; it does not establish artifact
+ownership. There is no runtime PRIVATE proof or write admission: PRIVATE
+publication is enforced at commit time by the hooks and CI.
 
 `query_github_visibility(repository)` asks GitHub live for one `OWNER/NAME`
 through the gh CLI with any stored account that can see it, owner first, so the
@@ -98,5 +91,5 @@ portable promise of directory-entry survival across Windows power loss.
 
 These primitives operate in trusted, cooperative directories. They do not isolate
 ancestor paths from a hostile concurrent process, implement atomic compare-and-swap,
-or prove PRIVATE repository visibility. Consumers must establish their own storage
-and publication authority before writing.
+or prove PRIVATE repository visibility. Consumers resolve their companion before
+writing; PRIVATE publication is enforced at commit time.

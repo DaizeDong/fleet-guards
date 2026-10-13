@@ -44,4 +44,4 @@ Eligible historical blobs above the 8 MiB scan limit make the history scan incom
 
 When another owner's private repository has exactly this repository's name or a documented companion name, the cross-repository policy retains that foreign `owner/name` as a qualified token. Bare own-companion names and explicit own-owner references do not identify the foreign repository. Explicit foreign references retain their original severity, unrelated private names retain bare-name enforcement, and independent secret denylist entries still apply.
 
-See [COMPANION.md](../COMPANION.md#verifying-a-companion) for destination proof and [STORAGE_CONTRACT.md](STORAGE_CONTRACT.md) for artifact write admission.
+See [COMPANION.md](../COMPANION.md#verifying-a-companion) for destination proof and [STORAGE_CONTRACT.md](STORAGE_CONTRACT.md) for source-owned storage contracts.

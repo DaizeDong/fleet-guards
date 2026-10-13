@@ -4,6 +4,17 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ## [Unreleased]
 
+### Removed
+
+- **No runtime PRIVATE proof for consumers.** `fleet_guards.runtime` no longer
+  exports `prove_private_companion` or `authorize_artifact_write`, and
+  `tools/storage_contract.py` no longer has `authorize_artifact_write` or
+  `ArtifactWriteAdmission`. COMPANION.md no longer tells consumers to prove
+  before writing. Proving on every write cost dozens of git/gh subprocesses per
+  call. PRIVATE publication stays enforced at commit time: `publication_guard`
+  and the companion audit still use `data_boundary.prove_private_companion`, and
+  the hooks and CI are unchanged.
+
 ### Added
 
 - **Live repository visibility no longer depends on the active gh account.**

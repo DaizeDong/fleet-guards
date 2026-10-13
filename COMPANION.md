@@ -22,7 +22,7 @@ Every source path has one class in `.dataclass.json`:
 ## How the companion is found
 
 `tools/datadir.py` probes these locations in order and takes the FIRST ONE THAT EXISTS as a
-directory. Discovery proves the companion identity described below; it does not establish PRIVATE write admission. `<SKILL>` is this repository's name uppercased with hyphens turned into underscores, so
+directory. Discovery proves the companion identity described below; PRIVATE publication is enforced at commit time, not at discovery or write time. `<SKILL>` is this repository's name uppercased with hyphens turned into underscores, so
 `small-cap-deepdive` becomes `SMALL_CAP_DEEPDIVE`.
 
 | Order | Location | Notes |
@@ -83,7 +83,7 @@ precisely the leak this whole boundary exists to prevent.
   - **a `.companion` file whose first line is the skill's name.** For a companion that is not a
     git repository, or whose remote is named differently for a reason.
 
-  With neither identity proof, the resolver raises `CompanionUnproven`. A marker can establish discovery identity for a non-Git directory, but it does not satisfy the PRIVATE Git repository requirement for write admission.
+  With neither identity proof, the resolver raises `CompanionUnproven`. A marker can establish discovery identity for a non-Git directory, but DATA still belongs in a versioned PRIVATE Git repository.
 - Real output is **tracked or ignored, never loose**. Output that is neither is in a limbo where
   nothing backs it up and where `git status` is buried under so much noise that a genuinely new
   file cannot be seen. Measured on one companion: 35 loose run trees, 1640 files, 1.5 GB, against
@@ -139,11 +139,13 @@ Certificate, TLS-backend, Git-helper and HTTP request environment overrides prod
 
 ### Proof API
 
-Consumer adapters can import `prove_private_companion(destination, visibility_map=None)` from the installed kit's `tools/data_boundary.py`. It returns an immutable proof with `root`, sorted `repositories`, and an opaque `signature`; the captured process configuration is private and excluded from its representation. The signature binds the canonical repository administration and physical/effective Git configuration snapshots. Configuration changes during proof fail with `GitError`. This wrapper uses the same policy as the companion audit and performs no DATA scan or network operation. Local built-in Git discovery and configuration reads precede the transport verdict.
+`prove_private_companion(destination, visibility_map=None)` in `tools/data_boundary.py` is the
+proof the commit-time publication guard and the companion audit use. It returns an immutable proof
+with `root`, sorted `repositories`, and an opaque `signature` binding the canonical repository
+administration and physical/effective Git configuration snapshots. It is not a write-time API:
+consumers do not call it before writing DATA. PRIVATE publication is enforced by the hooks and CI.
 
-`read_private_companion_git(proof, *arguments)` supports only `rev-parse --verify HEAD` and `check-ignore --no-index -q -- RELATIVE_PATH`, including exact `.` for the repository root. A canonical relative directory may end in one `/`, preserving Git's directory-only ignore semantics before that directory exists. Repeated separators, `./`, traversal and absolute paths remain invalid. It returns the native completed process, preserving ignore status 0/1; unsupported queries, noncanonical paths, changed configuration and other failures raise `GitError`. Consumers should serialize only the public fields they need, repeat the proof immediately before writing, and compare its root and signature with the earlier proof. A proof snapshot does not lock the filesystem or authorize a later push.
-
-A consumer that also confirms each proven repository live should call `query_github_visibility(repository)` from the same module instead of running `gh repo view` itself. gh keeps one active account per host for the whole machine, so a plain query answers "can the active account see it", and any session that runs `gh auth switch` turns every proof into a refusal. This function asks with the stored account named like the owner, then every other stored account, then gh's default credential (an explicit `GH_TOKEN`, or the active account). Each token is borrowed for one child process through `GH_TOKEN`; the active account is never changed and no token is printed. It returns `PRIVATE`, `PUBLIC` or `INTERNAL` from the first answer whose `nameWithOwner` names the requested repository, and raises `GitError` when no credential can see it. The caller still decides that only `PRIVATE` admits a write.
+A tool that confirms a repository's visibility live should call `query_github_visibility(repository)` from the same module instead of running `gh repo view` itself. gh keeps one active account per host for the whole machine, so a plain query answers "can the active account see it", and any session that runs `gh auth switch` turns every such query into a refusal. This function asks with the stored account named like the owner, then every other stored account, then gh's default credential (an explicit `GH_TOKEN`, or the active account). Each token is borrowed for one child process through `GH_TOKEN`; the active account is never changed and no token is printed. It returns `PRIVATE`, `PUBLIC` or `INTERNAL` from the first answer whose `nameWithOwner` names the requested repository, and raises `GitError` when no credential can see it. The caller still decides that only `PRIVATE` passes.
 
 Git's default injected `GIT_EXEC_PATH` is normalized
 only by the normal hook entrypoint after resolving the same Git executable and checking its default;
@@ -155,33 +157,6 @@ Git for Windows discovery recognizes its `cmd`, `bin`, architecture `bin`, and a
 resolves the same packaged SSH configuration and CA bundle; unknown layouts remain unproved.
 
 Explicit `remote.pushDefault` and `branch.*.remote` or `branch.*.pushRemote` values must name a configured remote, preserving the remote name's case. Local `.` selectors, missing remotes and direct URL/path selectors are unproved and fail admission. No particular remote name, including `origin`, is required.
-
-After loading the kit module as `boundary`, an adapter can use the following sequence. `existing_parent` is an existing directory containing the intended destination, `relative_path` is that destination's canonical path relative to the proven repository root, and `visibility_map` is a local receipt path or `None` for the default receipt.
-
-```python
-proof = boundary.prove_private_companion(existing_parent, visibility_map)
-head = boundary.read_private_companion_git(
-    proof, "rev-parse", "--verify", "HEAD"
-).stdout.strip()
-ignored = boundary.read_private_companion_git(
-    proof, "check-ignore", "--no-index", "-q", "--", relative_path
-)
-if ignored.returncode == 0:
-    raise boundary.GitError("The DATA destination is ignored")
-
-current = boundary.prove_private_companion(existing_parent, visibility_map)
-if (current.root, current.repositories, current.signature) != (
-    proof.root, proof.repositories, proof.signature
-):
-    raise boundary.GitError("Companion publication state changed before writing")
-```
-
-A failed proof or metadata read must stop the write. For source-owned artifact writes,
-use [`authorize_artifact_write`](docs/STORAGE_CONTRACT.md) from
-`tools/storage_contract.py`. It combines the proof above with exact companion-root,
-source separation, path ownership, alias, nested-repository, and versionability
-checks. The adapter still owns concurrent-writer handling and atomic writes.
-Keep admission adjacent to the write, and avoid serializing the proof's private context.
 
 ```
 python tools/data_boundary.py                 # this repo holds no run output
