@@ -51,7 +51,7 @@ condemns the correct shape: a private repo is exactly where a person's real data
 WHY THIS FILE DOES NOT CHECK VISIBILITY ITSELF
 ----------------------------------------------
 The tempting next step is to have this function refuse a data dir that sits in a PUBLIC repo. It
-cannot do that honestly. This file is vendored into every public skill repo, is stdlib-only by
+cannot do that honestly. This file ships in every public skill repo, is stdlib-only by
 contract, and has to work on a fresh clone on a stranger's machine: no ~/.pii-guard/visibility.json,
 no `gh`, possibly no network. Fail-closed there bricks every fresh clone on a question that has no
 local answer; fail-open makes the assertion decorative precisely where it matters. So the visibility
@@ -68,7 +68,7 @@ path inside the repo. A silent in-repo fallback is how this happened: `reference
 documented "legacy fallback", and the operator's real SEC contact email ended up committed in it.
 A fallback into the repo is not a convenience, it is the leak.
 
-Vendored into each skill as `tools/datadir.py`. Stdlib only.
+Reached through the guards submodule as `guards/tools/datadir.py`. Stdlib only.
 """
 import os
 import re

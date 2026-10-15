@@ -3,9 +3,7 @@
     "Skill Repo Spec v1 s9 -- every path in this repo belongs to exactly one class.",
     "This repo is ALL TOOL: it ships the guard kit and nothing else. It holds no fixtures,",
     "because it has no product to fixture, and it can never hold DATA, because nothing here",
-    "runs against a real target. The tests are TOOL too: they must contain the shapes the",
-    "guards detect, which is why pii_guard self-excludes them structurally while still",
-    "applying the private denylist to them."
+    "runs against a real target."
   ],
   "data": [],
   "data_sealed": [],
@@ -13,7 +11,7 @@
   "_audited": [
     "2026-09-02. The data list is empty because this repo produces no real-run output at all, not",
     "because nobody looked. This is the security kit: the scanner, the data boundary, the companion",
-    "resolver, their tests, the hooks and the composite CI action. It has no companion repo and needs",
+    "resolver, the hooks and the composite CI action. It has no companion repo and needs",
     "none.",
     "",
     "How that was checked, rather than assumed. Every write in shipped (non-test) code was located:",
@@ -26,7 +24,7 @@
     "_run_shape_probes stays empty for the same reason and is the one honest answer here: a probe",
     "list names what a real run of THIS repo writes, and a real run of this repo writes nothing.",
     "2026-10-03. tools/fleet_sync.py writes selected consumer gitlinks and ephemeral runner Git configuration. Explicit POSIX Actions refresh additionally writes repository visibility metadata to the job's external ~/.pii-guard/visibility.json receipt. The initializer validates receipt placement and permissions; private publication still requires canonical metadata and route proof. Subscriber inventory and credentials are read from Actions secrets, never written into the public kit. Real enrollment and verification records belong in a private administration repository.",
-    "2026-10-05. The shared Python filesystem API writes only to explicit caller-supplied paths; it owns no runtime store or default output path. Credential scans return metadata to the caller or stdout. Package builds contain TOOL code only; tests create disposable synthetic files from tools/make_fixtures.py. No real-run DATA destination is introduced in this repository. Consumers retain responsibility for proving PRIVATE storage and publication authority.",
+    "2026-10-05. The shared Python filesystem API writes only to explicit caller-supplied paths; it owns no runtime store or default output path. Credential scans return metadata to the caller or stdout. Package builds contain TOOL code only. No real-run DATA destination is introduced in this repository. Consumers retain responsibility for proving PRIVATE storage and publication authority.",
     "2026-10-09. Consumer-declared (including private) upstreams add no write location. tools/fleet_sync.py hands the fetch credential to each networked git child through process-scoped GIT_CONFIG_* environment variables only; nothing is written to a config file, URL or log. Upstream names come from the consumer workflow input and the upstream's own workflow inputs at run time; the public kit holds only the synthetic example/upstream."
   ]
 }

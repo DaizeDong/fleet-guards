@@ -27,8 +27,7 @@ Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACK
 
 ## 它是什么（不是什么）
 
-它是舰队的安全套件：扫描器、数据边界、伴生仓解析器、它们的测试、两个 git 钩子，以及一个 composite
-CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。
+它是舰队的安全套件：扫描器、数据边界、伴生仓解析器、git 钩子，以及一个 composite CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。只有装了它的仓库才被检查，没有机器级钩子。
 
 九条检测规则，由五个工具里的 38 条正则实现。它们实际挡的是：
 
@@ -49,8 +48,6 @@ CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。
 
 本仓通过 Git/CI 使用，没有 Claude Code skill 或 plugin 入口。文风和加载预算检查由 `fleet-style` 维护；最初拆出的 `dash_guard` 和 `load_budget` 占当时套件的 17.5%。本子模块必须保持公开，确保公开消费仓能在 CI 中获取。
 
-旧部署把 17 个文件、每套 7,643 行复制到 22 个消费仓，历史清单记录磁盘上约有 191,000 行。安装器依赖人工维护的仓库列表；2026-08-31 的审计发现，两个遗漏的公开仓仍使用 fail-open pre-push 钩子。现在每个消费仓用自身版本历史中的 submodule 指针声明依赖。
-
 ## 安装
 
     git submodule add -b main https://github.com/DaizeDong/fleet-guards.git guards
@@ -60,9 +57,7 @@ CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。
 必须在 `guards/hooks/<hook>` 缺失时停住，存在时再 exec 过去。让 git 直接指向一个空的 submodule 会静
 默地关掉闸门；被提交进来的转发脚本，正是察觉「克隆不完整」的那个东西。
 
-伴生仓检查只加载目标仓已登记的 fleet-guards 子模块中的解析器，支持自定义子模块路径。
-独立部署应运行该仓自己的 `tools/data_boundary.py`，也可用 `--companion-dir` 明确指定数据目录。
-子模块或解析器缺失时检查会失败，不会转去加载消费仓里遗留的副本。
+`hooks/pre-commit` 承载两个阶段的逻辑，`hooks/pre-push` 只是带 `--phase pre-push` 重新执行它。提交阶段先对照 `~/.pii-guard/identities.conf` 断言提交身份，再跑 `publication_guard.py`。推送阶段遇到只删除 ref 的推送直接放行。两者都直接调用 `python`，解释器缺失或不可用时返回非零，即被拦下。
 
 `.gitmodules` 使用 HTTPS URL，确保其他机器和 CI 可以解析。首次迁移使用本机 SSH 主机别名，导致三个 workflow 均以 "Could not read from remote repository" 失败。
 
@@ -82,11 +77,10 @@ CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。
       - uses: ./guards/ci/pii-guard
 ```
 
-在消费仓根目录手工跑同样这几项：
+在消费仓根目录手工跑发布策略：
 
 ```bash
 python guards/tools/publication_guard.py ci
-python guards/tools/test_companion_contract.py
 ```
 
 常规钩子和 CI 使用[发布策略](docs/PUBLICATION_POLICY.md)：只有当前证据证明全部物理及生效 fetch/push 目标均为 PRIVATE，才允许私有内容；证据缺失时继续执行公开策略。PRIVATE 仓仍检查声明、schema、fixture、路径和提交身份。直接运行 `pii_guard.py --tree --history` 或 `data_boundary.py` 始终采用公开策略。伴生仓准入、证据有效期和传输要求见 [COMPANION.md](COMPANION.md#verifying-a-companion)。
@@ -100,12 +94,11 @@ python guards/tools/test_companion_contract.py
 | `tools/publication_guard.py` | 根据已证明的仓库可见性选择常规钩子和 CI 策略。 |
 | `tools/datadir.py` | 解析器。决定真实运行产出往哪写，而答案永远在仓库之外。 |
 | `tools/fleet_sync.py` | 分发已验证的上游更新，并推进各消费仓的 gitlink。 |
-| `tools/test_*.py` | 套件自己的测试，含那一层私有部分在 runner 上永远不存在的策略层。 |
-| `hooks/` | `pre-commit` 与 `pre-push`，消费仓的转发脚本最终 exec 进来的本体。 |
+| `hooks/` | `pre-commit`（两个阶段）与 `pre-push`（重新执行前者），消费仓的转发脚本最终 exec 进来的本体。 |
 | `ci/pii-guard/action.yml` | 每个消费仓按本地路径引用的 composite action。 |
 | `templates/fleet-sync.yml` | 消费仓为接入自动同步而拷走的那一个 workflow。 |
 | `templates/upstream-notify.yml` | 自定义上游（包括私有仓）拷走、用来通知自己那批消费仓的 workflow。 |
-| `COMPANION.md` | 公开仓与私有伴生仓之间的契约，由一个测试对着解析器逐条核对。 |
+| `COMPANION.md` | 公开仓与私有伴生仓之间的契约。 |
 | `docs/AUTOMATIC_SYNC.md` | 消费仓怎么接入，以及分发路径为什么长这样。 |
 
 ## 怎么更新一个消费仓
@@ -137,16 +130,7 @@ data_boundary: clean (0 DATA + 0 sealed paths not tracked, 0 FIXTUREs generator-
 
 ## 在 Windows 上起进程
 
-套件起的每一个进程都经过 `_no_window()`，任何绕过它的 `subprocess` 调用、`os.system`、`os.popen` 或进程池，
-都会让 `tools/test_no_console_window.py` 失败。理由是实测出来的，不是推演的：一个自己没有控制台的进程
-（`pythonw`、计划任务、服务）启动控制台程序时，子进程会拿到一个新控制台，而 Windows 会把它显示成一个窗口。
-一个在每行日志都去证明私有伴生仓的守护进程，每次证明跑大约 19 条 git 命令，八小时里弹出了约 9,000 个终端窗口。
-
-这个辅助函数只在调用方没有控制台时才加 `CREATE_NO_WINDOW`。有控制台时，子进程共用它，什么都不会弹出；
-这时再加这个标志，反而会把子进程没有重定向的输出和终端提示挪进一个隐藏控制台，钩子的发现就没人看得到了。
-它拒绝 `DETACHED_PROCESS`，因为 Windows 在它旁边会忽略 `CREATE_NO_WINDOW`，没有控制台的子进程再起的子进程
-又会弹窗；也拒绝 `CREATE_NEW_CONSOLE`，那本身就是一个窗口。每个工具文件各带一份副本，因为消费仓是按路径
-一个文件一个文件加载的；同一个测试保证每份副本完全一致。
+套件起的每一个进程都经过 `_no_window()`。没有控制台的进程（`pythonw`、计划任务、服务）启动控制台程序时，Windows 会弹出一个窗口。这个辅助函数只在调用方没有控制台时才加 `CREATE_NO_WINDOW`，所以钩子未重定向的输出不会被藏起来；它拒绝 `DETACHED_PROCESS` 和 `CREATE_NEW_CONSOLE`。每个工具文件各带一份副本，因为消费仓是按路径一个文件一个文件加载的。
 
 ## 局限
 
@@ -160,10 +144,9 @@ pre-commit 框架会拒绝安装：`pre-commit install` 打印 "Cowardly refusin
 该次检查通过了 ruff 默认规则；更严格的配置报告了 155 条把 %-格式化改成 f-string 的建议。消费仓使用自己的 lint 策略时，可用 `extend-exclude = ["guards", "style"]` 排除子模块。
 
 你自己那个同名模块会赢。当仓库自己的目录排在 `sys.path` 前面时，`import datadir` 解析到的是仓库自己那
-份，不是套件这份。根目录的 `conftest.py` 同样赢过这里的那份。反过来只会在你把套件路径排到前面时发生，
-那是一个选择，不是默认。
+份，不是套件这份。反过来只会在你把套件路径排到前面时发生，那是一个选择，不是默认。
 
-该次消费仓检查中，新增顶层 package 和测试正常收集，`find_packages()` 不收集子模块，根目录 `pytest` 不收集套件测试，而显式 `pytest guards/tools/` 会收集。`pytest.ini` 的 `testpaths` 没有改变结果，测试结束后子模块保持 clean。
+套件不带测试，消费仓的 `pytest` 不会从 `guards/` 收集到任何东西。
 
 **散文中的私有事实仍是缺口。** DATA 不在公开源码中，可以避免把这些文件误带进产物。结构规则识别标识符，私有词表识别已配置名称，但它们不能证明一段文字没有泄露私事。公开示例必须使用合成数据。
 

@@ -80,8 +80,8 @@ directly below it. A consumer count was considered and rejected: it changes when
 enrolls or leaves, and a badge that drifts away from the truth on its own is worse than no badge.
 
 **The data-boundary toolchain is this repository.** Chapter 9 requires `tools/datadir.py`,
-`tools/test_datadir.py`, `tools/data_boundary.py` and `tools/make_fixtures.py` in every repository.
-The first three are here as the originals rather than as copies. `make_fixtures.py` is absent
+`tools/data_boundary.py` and `tools/make_fixtures.py` in every repository.
+The first two are here as the originals rather than as copies. `make_fixtures.py` is absent
 because this repository declares no FIXTUREs: a generator with nothing to generate would print a
 green line forever, and the chapter's point is that a fixture must be reproducible, not that a
 generator must exist. `.dataclass.json` argues both the empty DATA list and the empty FIXTURE list
@@ -92,9 +92,7 @@ which is outside every work tree.
 
 | Claim | How it was checked |
 | --- | --- |
-| The kit's own suite passes | `python -m pytest tools/ -q` at the repository root: 330 passed, 1 skipped |
 | The scanner is armed, not merely present | `python tools/pii_guard.py --tree` prints `clean (tree) [28 file(s) scanned, 0 skipped]`; the file count is the part that distinguishes clean from never checked |
 | The boundary is armed | `python tools/data_boundary.py` prints clean over 28 tracked files with 0 DATA and 0 FIXTURE paths, which is the conclusion `.dataclass.json` argues |
-| The companion document still matches the resolver | `python tools/test_companion_contract.py` passes all four of its sections, including the refusal to resolve a data directory inside the repository |
 | No style submodule exists to wire | No `.gitmodules` in the tree, and no `style/` directory |
 | The repository declares no version | A tree wide grep for `version`, `VERSION` and `__version__` outside `__pycache__` returns only Python version pins in workflows, a GitHub API header and prose inside comments |

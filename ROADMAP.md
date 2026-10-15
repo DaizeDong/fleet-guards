@@ -13,23 +13,19 @@ which is the single home for that reasoning, and what changed lives in `CHANGELO
 - The scanner: nine detection rules across 38 regexes, allowlist based, over the working tree and
   the full history (`tools/pii_guard.py`).
 - The policy layer: a private term list that stays on one machine, with a load proof so a list that
-  failed to load is refused rather than treated as empty (`tools/test_pii_guard_v2.py` pins the
-  shape of it).
+  failed to load is refused rather than treated as empty.
 - The data boundary: every path declared TOOL, FIXTURE or DATA in `.dataclass.json`, with fixtures
   required to be generator reproducible (`tools/data_boundary.py`).
 - The companion resolver: documented probe locations in a fixed order, a proof requirement, and a refusal
   to resolve a data directory that sits inside the skill's own repository (`tools/datadir.py`).
-- The companion contract, checked against the resolver by construction rather than by reading
-  (`COMPANION.md`, `tools/test_companion_contract.py`).
+- The companion contract (`COMPANION.md`).
 - Source-owned storage contract validation and path matching
   (`tools/storage_contract.py`, `docs/STORAGE_CONTRACT.md`).
-- Commit and push gates, fail closed on a missing scanner, a missing interpreter and a comparison
-  that cannot prove it runs (`hooks/pre-commit`, `hooks/pre-push`).
-- One composite CI action every consumer references by local path, with no step that skips itself
-  when its file is absent (`ci/pii-guard/action.yml`).
+- Per-repo commit and push gates with one implementation, blocking on a missing kit, a failing
+  interpreter and a comparison that cannot prove it runs (`hooks/pre-commit`, `hooks/pre-push`).
+- One composite CI action every consumer references by local path (`ci/pii-guard/action.yml`).
 - Window-less process spawning: every process the kit starts goes through one helper that gives a
-  console-less caller's children a hidden console, enforced by a structural scan
-  (`tools/test_no_console_window.py`).
+  console-less caller's children a hidden console.
 - Automatic submodule synchronization: a verified upstream check dispatches to enrolled consumers,
   which advance their own gitlink through their own gates (`tools/fleet_sync.py`,
   `docs/AUTOMATIC_SYNC.md`, `templates/fleet-sync.yml`).

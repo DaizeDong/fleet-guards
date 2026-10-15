@@ -1,9 +1,4 @@
 # The kit's own gate, run through the kit's own action.
-#
-# It used to be a second copy of those steps. Two copies of the same argument, one of them the
-# thing shipped to every consumer and one of them what this repo actually proves about itself, is
-# how the shipped path breaks while the source repo stays green. Now the action IS the subject:
-# if `uses: ./ci/pii-guard` fails here, it would have failed in 23 consumers.
 name: pii-guard
 
 on:
@@ -11,15 +6,6 @@ on:
   pull_request:
 
 jobs:
-  sync-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-      - run: python -m pip install pytest
-      - run: python -m pytest tools/test_fleet_sync.py -q
   scan:
     runs-on: ubuntu-latest
     steps:

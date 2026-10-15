@@ -1,4 +1,4 @@
-"""Consumer-bound access to the canonical companion resolver and visibility query.
+"""Consumer-bound access to the canonical companion resolver.
 
 PRIVATE publication is enforced at commit time by the hooks and CI, not by a runtime proof.
 """
@@ -68,9 +68,3 @@ class CompanionResolver:
 def companion_resolver(*, source_root):
     """Bind discovery to an explicit consumer source root, never the Guards installation."""
     return CompanionResolver(source_root)
-
-
-def query_github_visibility(repository, *, timeout=20):
-    """Ask GitHub for OWNER/NAME's visibility with any logged-in gh account, never the active one alone."""
-    return _canonical("data_boundary").query_github_visibility(repository, timeout=timeout)
-

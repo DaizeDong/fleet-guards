@@ -88,23 +88,10 @@ import sys
 
 
 # ------------------------------------------------- spawning processes (identical in every kit file)
-# A console program started by a process that has NO console (pythonw, a scheduled task, a service)
-# is handed a brand-new console, and Windows shows it as a window. Measured 2026-10-05: a daemon
-# under pythonw ran a companion proof on every log line, each proof ran about 19 git commands, and
-# the machine took roughly 9,000 terminal windows in eight hours. So every spawn in this kit goes
-# through _no_window(), and tools/test_no_console_window.py fails on any spawn that does not.
-#
-# The flag is added ONLY when this process has no console. A process that has one already shares it
-# with its children and never opens a window; giving those children CREATE_NO_WINDOW would instead
-# move their unredirected output and terminal prompts into a hidden console, where a hook's findings
-# would vanish (measured: an unredirected child's output is simply lost). DETACHED_PROCESS and
-# CREATE_NEW_CONSOLE are refused outright: the first makes Windows ignore CREATE_NO_WINDOW and
-# leaves a console-less child whose own children open windows again, and the second opens a window
-# by definition.
-#
-# Each file carries its own copy because consumers load these files one at a time by path; a
-# shared sibling module would be a new way for a single copied file to fail. That test holds
-# every copy identical, so the copies cannot drift.
+# Every spawn goes through _no_window(): a console child of a console-less process (pythonw, a
+# scheduled task) otherwise opens a visible window. The flag is added only when this process has no
+# console, so a hook's unredirected output is never hidden. Each file carries its own copy because
+# consumers load these files one at a time by path.
 def _console_less_windows():
     """True on Windows when this process has no console, so a console child would get a window.
 
@@ -265,16 +252,11 @@ NOT_A_DOMAIN_RE = re.compile(r"^(pytest|mark|fixture|param|parametrize|patch|moc
                              r"classmethod|property|dataclass|app|router|task)\b", re.I)
 
 SKIP_DIR = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".pytest_cache"}
-# The guard and its tests MUST contain the shapes they detect -- a test proving a real-looking phone
-# number is caught has to contain a real-looking phone number. So the STRUCTURAL checks are skipped
-# on them. The PRIVATE DENYLIST is NOT: without that, "name it test_pii_guard.py" would be a hole
-# straight through the gate. (`.pii-allow` is the allowlist itself; scanning it just re-finds it.)
+# The scanner contains the shapes it detects, so the STRUCTURAL checks skip it. The PRIVATE DENYLIST
+# still applies. Keyed on the repo-relative path, not the basename, so renaming a file to
+# pii_guard.py elsewhere buys nothing. The two test names are no longer shipped but remain in the
+# reachable history of this repo and of every formerly vendored consumer, which --history scans.
 SCANNER_FILES = {"pii_guard.py", "test_pii_guard.py", "test_pii_guard_v2.py", ".pii-allow"}
-# ...but matching that set by BASENAME was a hole straight through the gate, which is the very
-# thing the comment above warns about and then did not prevent. `git mv secrets.md
-# docs/pii_guard.py` bought a file, anywhere in the repo, that skipped every structural check.
-# The exemption is for THESE files at THEIR vendored locations, so it is keyed on the repo-relative
-# path. install.py puts them exactly here and nowhere else.
 SCANNER_PATHS = {"tools/pii_guard.py", "tools/test_pii_guard.py", "tools/test_pii_guard_v2.py",
                  ".pii-allow"}
 
@@ -352,8 +334,7 @@ def _run(args, cwd, allow_fail=False):
     findings stayed empty, and main() printed "pii_guard: clean (tree)" and exited 0 having read not
     one byte. Everything that can break git produced that result -- a directory that is not a repo,
     an extracted git-archive with no .git, git absent from PATH, an index.lock, a permission error,
-    a dubious-ownership refusal. The vendored CI workflow's entire job is running this command, so a
-    workflow that scanned nothing reported success, on 18 public repos where this is the authority.
+    a dubious-ownership refusal.
 
     So: a nonzero exit RAISES, carrying git's own stderr. A clean report now requires that the scan
     actually happened.
@@ -770,9 +751,7 @@ def _parse_denylist(path, notes=None):
     The v1 encoding cannot tell a healthy file from a damaged one. Delete half the array and
     what remains is still valid JSON, the surviving tokens still work, and nothing anywhere
     says a word. The canary answers "did I load THE file" and the count answers "did I load
-    ALL of it". This is the same move already made one layer up, where the machine-wide
-    pre-commit hook probes that its case-folding tool actually runs before trusting a
-    comparison: a check whose failure mode is silent agreement has to prove it can disagree.
+    ALL of it". A check whose failure mode is silent agreement has to prove it can disagree.
     """
     data = _read_json(path)
 
@@ -783,14 +762,10 @@ def _parse_denylist(path, notes=None):
     elif isinstance(data, dict):
         fmt = data.get("format", 1)
         if type(fmt) is not int or not 1 <= fmt <= POLICY_FORMAT_SUPPORTED:
-            # Deliberately NOT "treat everything as secret, that is safer". A silent strictness
-            # upgrade would hide the fact that this copy of the guard is older than the policy
-            # it is reading, which is the exact condition under which a vendored copy in one of
-            # the other repos would be misreading it too.
+            # Refuse rather than silently treat everything as secret: this copy is older than the policy.
             raise PolicyError(
                 "%s declares format %r but this pii_guard understands up to %d.\n"
-                "  This copy is older than the policy file. Re-run install.py --all so every\n"
-                "  vendored copy is upgraded, rather than letting each repo guess."
+                "  This copy is older than the policy file. Advance the guards submodule."
                 % (path, fmt, POLICY_FORMAT_SUPPORTED))
         if "tokens" not in data:
             raise PolicyError(
@@ -851,7 +826,7 @@ def _parse_denylist(path, notes=None):
                 % (path, canary))
         # The canary is an ATTESTATION, not policy. Leaving it in the token set would make every
         # file that legitimately writes it down a finding -- starting with this one, which has to
-        # name it in order to check for it, and which is vendored into every public repo.
+        # name it in order to check for it, and which ships in every public repo.
         toks_after_canary = [t for t in toks if t.value != canary.lower()]
     else:
         toks_after_canary = toks
@@ -882,10 +857,8 @@ def _probe_matcher():
     """Prove the matcher executes before trusting anything it says.
 
     A comparison whose failure mode is "nothing ever matches" cannot be validated by observing
-    that nothing matched. The machine-wide pre-commit hook already learned this the hard way
-    with its case-folding probe: with the tool off PATH both sides folded to the empty string,
-    every identity compared equal, and the assertion passed for every input. So: feed the
-    matcher a string that appears in no file, and require a hit. Costs microseconds.
+    that nothing matched. So: feed the matcher a string that appears in no file, and require a
+    hit. Costs microseconds.
     """
     for probe in (MATCHER_PROBE, MATCHER_PROBE_ALPHA):
         _probe_one(probe)
@@ -1903,7 +1876,7 @@ def scan_range(root, allow, pol, rev_range):
 
 
 def scan_staged(root, allow, pol):
-    """Scan only what is staged -- the machine-wide pre-commit gate.
+    """Scan only what is staged -- the pre-commit gate.
 
     This is the cheapest possible place to catch a leak, and the only one where the fix is still an
     EDIT. One commit later it is a history rewrite and a force-push; one push later it is public
@@ -2061,10 +2034,10 @@ def main():
     ap.add_argument("--history", action="store_true", help="scan reachable content, identities, tag metadata and ref names")
     ap.add_argument("--range", dest="rev_range", default=None,
                     help="scan only the commits in this rev-range (e.g. 'abc..def', or "
-                         "'<sha> --not --remotes'). Used by the machine-wide pre-push hook.")
+                         "'<sha> --not --remotes').")
     ap.add_argument("--staged", action="store_true",
-                    help="scan only what is staged. Used by the machine-wide pre-commit hook: "
-                         "catching it here means the fix is still an EDIT, not a history rewrite.")
+                    help="scan only what is staged; catching it here means the fix is still an "
+                         "EDIT, not a history rewrite.")
     a = ap.parse_args()
     if not (a.tree or a.history or a.rev_range or a.staged):
         a.tree = True

@@ -104,13 +104,11 @@ rather than part of this contract. Do not add them to satisfy a checker; nothing
 
 ## Verifying a companion
 
-Audit that companion with:
+A companion is verified when it commits or pushes: its own hooks and CI run
+`publication_guard.py`, which calls `prove_private_companion` against the visibility receipt
+`~/.pii-guard/visibility.json`.
 
-```bash
-python guards/tools/data_boundary.py --companion-dir ../example-skill-config --visibility-map /path/to/visibility.json
-```
-
-The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed` timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL rewrites and additional push URLs are checked. The audit prints the verified repository names and allows versioned DATA there. SSH aliases require an explicit `HostName github.com` in every plausible configuration chain. Missing or stale evidence, public destinations, unrecognized clients, and unproved routing or trust settings block admission. See [the transport contract](COMPANION.md#verifying-a-companion) for the supported SSH and HTTPS configurations. This check uses the local receipt and does not make network calls.
+The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed` timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL rewrites and additional push URLs are checked. The guard prints the verified repository names and allows versioned DATA there. SSH aliases require an explicit `HostName github.com` in every plausible configuration chain. Missing or stale evidence, public destinations, unrecognized clients, and unproved routing or trust settings block admission. See [the transport contract](COMPANION.md#verifying-a-companion) for the supported SSH and HTTPS configurations. This check uses the local receipt and does not make network calls.
 
 Companion discovery starts at the physical DATA destination, independently of the invoking hook's
 repository and index. Its stored repository configuration and its effective process configuration
@@ -140,12 +138,10 @@ Certificate, TLS-backend, Git-helper and HTTP request environment overrides prod
 ### Proof API
 
 `prove_private_companion(destination, visibility_map=None)` in `tools/data_boundary.py` is the
-proof the commit-time publication guard and the companion audit use. It returns an immutable proof
+proof the commit-time publication guard and fleet_sync use. It returns an immutable proof
 with `root`, sorted `repositories`, and an opaque `signature` binding the canonical repository
 administration and physical/effective Git configuration snapshots. It is not a write-time API:
 consumers do not call it before writing DATA. PRIVATE publication is enforced by the hooks and CI.
-
-A tool that confirms a repository's visibility live should call `query_github_visibility(repository)` from the same module instead of running `gh repo view` itself. gh keeps one active account per host for the whole machine, so a plain query answers "can the active account see it", and any session that runs `gh auth switch` turns every such query into a refusal. This function asks with the stored account named like the owner, then every other stored account, then gh's default credential (an explicit `GH_TOKEN`, or the active account). Each token is borrowed for one child process through `GH_TOKEN`; the active account is never changed and no token is printed. It returns `PRIVATE`, `PUBLIC` or `INTERNAL` from the first answer whose `nameWithOwner` names the requested repository, and raises `GitError` when no credential can see it. The caller still decides that only `PRIVATE` passes.
 
 Git's default injected `GIT_EXEC_PATH` is normalized
 only by the normal hook entrypoint after resolving the same Git executable and checking its default;

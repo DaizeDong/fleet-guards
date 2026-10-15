@@ -18,7 +18,7 @@ workflow and synchronization script live in fleet-guards. The reusable workflow'
 accept workflow updates. Both dispatcher and consumer checkouts pin the Python
 updater to a reviewed, immutable commit, so a newer unverified script cannot run
 while an earlier notification is being processed. After changing the updater,
-run its tests and review it, commit it, then advance both workflow checkout pins
+review it, commit it, then advance both workflow checkout pins
 to that commit in a separate commit.
 
 ## Enroll a consumer

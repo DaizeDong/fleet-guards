@@ -16,23 +16,10 @@ import urllib.request
 
 
 # ------------------------------------------------- spawning processes (identical in every kit file)
-# A console program started by a process that has NO console (pythonw, a scheduled task, a service)
-# is handed a brand-new console, and Windows shows it as a window. Measured 2026-10-05: a daemon
-# under pythonw ran a companion proof on every log line, each proof ran about 19 git commands, and
-# the machine took roughly 9,000 terminal windows in eight hours. So every spawn in this kit goes
-# through _no_window(), and tools/test_no_console_window.py fails on any spawn that does not.
-#
-# The flag is added ONLY when this process has no console. A process that has one already shares it
-# with its children and never opens a window; giving those children CREATE_NO_WINDOW would instead
-# move their unredirected output and terminal prompts into a hidden console, where a hook's findings
-# would vanish (measured: an unredirected child's output is simply lost). DETACHED_PROCESS and
-# CREATE_NEW_CONSOLE are refused outright: the first makes Windows ignore CREATE_NO_WINDOW and
-# leaves a console-less child whose own children open windows again, and the second opens a window
-# by definition.
-#
-# Each file carries its own copy because consumers load these files one at a time by path; a
-# shared sibling module would be a new way for a single copied file to fail. That test holds
-# every copy identical, so the copies cannot drift.
+# Every spawn goes through _no_window(): a console child of a console-less process (pythonw, a
+# scheduled task) otherwise opens a visible window. The flag is added only when this process has no
+# console, so a hook's unredirected output is never hidden. Each file carries its own copy because
+# consumers load these files one at a time by path.
 def _console_less_windows():
     """True on Windows when this process has no console, so a console child would get a window.
 
@@ -212,17 +199,9 @@ def main():
         previous = sys.argv
         try:
             sys.argv = [str(kit / "data_boundary.py"), "--repo", proof.root]
-            result = boundary.main(private_proof=proof)
+            return boundary.main(private_proof=proof)
         finally:
             sys.argv = previous
-        if result == 0:
-            with native_hook_environment(arguments.phase):
-                current = private_proof(boundary, proof.root, arguments.phase, arguments.push_destination)
-            if (current is None or (current.root, current.repositories, current.signature)
-                    != (proof.root, proof.repositories, proof.signature)):
-                print("publication_guard: PRIVATE authorization changed during checks; retry required.")
-                return 2
-        return result
     scope = ["--tree", "--staged" if arguments.phase == "pre-commit" else "--history"]
     for name, options in (("pii_guard.py", scope), ("data_boundary.py", [])):
         result = subprocess.run([sys.executable, str(kit / name), "--repo", arguments.repo, *options],

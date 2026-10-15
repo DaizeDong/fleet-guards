@@ -86,23 +86,10 @@ from dataclasses import dataclass, field
 
 
 # ------------------------------------------------- spawning processes (identical in every kit file)
-# A console program started by a process that has NO console (pythonw, a scheduled task, a service)
-# is handed a brand-new console, and Windows shows it as a window. Measured 2026-10-05: a daemon
-# under pythonw ran a companion proof on every log line, each proof ran about 19 git commands, and
-# the machine took roughly 9,000 terminal windows in eight hours. So every spawn in this kit goes
-# through _no_window(), and tools/test_no_console_window.py fails on any spawn that does not.
-#
-# The flag is added ONLY when this process has no console. A process that has one already shares it
-# with its children and never opens a window; giving those children CREATE_NO_WINDOW would instead
-# move their unredirected output and terminal prompts into a hidden console, where a hook's findings
-# would vanish (measured: an unredirected child's output is simply lost). DETACHED_PROCESS and
-# CREATE_NEW_CONSOLE are refused outright: the first makes Windows ignore CREATE_NO_WINDOW and
-# leaves a console-less child whose own children open windows again, and the second opens a window
-# by definition.
-#
-# Each file carries its own copy because consumers load these files one at a time by path; a
-# shared sibling module would be a new way for a single copied file to fail. That test holds
-# every copy identical, so the copies cannot drift.
+# Every spawn goes through _no_window(): a console child of a console-less process (pythonw, a
+# scheduled task) otherwise opens a visible window. The flag is added only when this process has no
+# console, so a hook's unredirected output is never hidden. Each file carries its own copy because
+# consumers load these files one at a time by path.
 def _console_less_windows():
     """True on Windows when this process has no console, so a console child would get a window.
 
@@ -160,7 +147,7 @@ SHAPE_EXEMPT = re.compile(r"\.(example|sample|tmpl|template)(\.|$)", re.I)
 #
 # WHERE THESE PATTERNS CAME FROM. Six of the twelve were calibrated in daily-hotspots against a real
 # run, the only place in the fleet where that had been done, and promoted here on 2026-08-30 after
-# being scored against every git-tracked file in all 18 public repos: zero undeclared hits, so
+# being scored against every git-tracked file in the public repos: zero undeclared hits, so
 # nothing turns red on adoption. They carry some vocabulary harvested from real skills (roster,
 # candidates, cards, shards) and that is deliberate, because these ARE the words this fleet's
 # pipelines use. What is NOT promoted is the per-skill inventory that surrounded them: which files
@@ -265,12 +252,6 @@ def _run(args, cwd, env=None):
     having examined nothing. Anything that breaks git produced that: a shell .git directory
     (a shape that has actually occurred on this machine), a directory that is not a repo,
     git missing from PATH, an index.lock, a dubious-ownership refusal.
-
-    pii_guard and dash_guard were hardened against exactly this and this file was the
-    outlier, which meant the two scanners disagreed about the same broken environment:
-    pii_guard --tree exited 2 saying NOTHING was examined while data_boundary next to it
-    printed clean and exited 0. install.py:86 calls this file the PRIMARY control, so the
-    control was the one lying.
 
     A nonzero exit now RAISES, carrying git's own stderr. A clean report requires that the
     scan actually happened.
@@ -531,70 +512,6 @@ def check_fixtures_are_generated(root, m, out):
                 out.append(("HAND-EDITED", rel,
                             "does not match the generator -- a real record cannot be regenerated. "
                             "Change the SCHEMA, then run: python tools/make_fixtures.py"))
-
-
-def _resolver_path(target):
-    """Select a tracked resolver from this tool or the target's registered guard submodule."""
-    modules = os.path.join(target, ".gitmodules")
-    selected = []
-    if os.path.isfile(modules):
-        config = {}
-        for entry in _run(["git", "config", "--file", modules, "--null", "--list"], target).split("\0"):
-            if entry:
-                key, _, value = entry.partition("\n")
-                config.setdefault(key, []).append(value)
-        for key, values in config.items():
-            if not key.startswith("submodule.") or not key.endswith(".url"):
-                continue
-            if any(_github_repo_key(value) == ("daizedong", "fleet-guards") for value in values):
-                paths = config.get(key[:-3] + "path", [])
-                if len(values) != 1 or len(paths) != 1:
-                    raise RuntimeError("guard submodule declaration is ambiguous")
-                selected.append(paths[0])
-    if len(selected) > 1:
-        raise RuntimeError("multiple guard submodules are registered; resolver provenance is ambiguous")
-    if selected:
-        relative = selected[0]
-        if (not relative or "\\" in relative or ntpath.splitdrive(relative)[0]
-                or any(part in ("", ".", "..") for part in relative.split("/"))):
-            raise RuntimeError("guard submodule path must be canonical and repository-relative")
-        if relative not in gitlinks(target):
-            raise RuntimeError("guard submodule has no authoritative gitlink in the index")
-        deployment = os.path.realpath(os.path.join(target, relative))
-        if os.path.commonpath([deployment, target]) != target or deployment == target:
-            raise RuntimeError("guard submodule resolves outside the target worktree")
-        if not os.path.isdir(deployment) or os.path.realpath(_repo_root(deployment)) != deployment:
-            raise RuntimeError("guard submodule checkout is incomplete")
-    else:
-        deployment = os.path.realpath(_repo_root(os.path.dirname(os.path.abspath(__file__))))
-        if deployment != target or os.path.dirname(os.path.abspath(__file__)) != os.path.join(target, "tools"):
-            raise RuntimeError("no guard submodule is registered; run the target's own tools/data_boundary.py "
-                               "or supply --companion-dir explicitly")
-    resolver = os.path.join(deployment, "tools", "datadir.py")
-    if not os.path.isfile(resolver) or os.path.realpath(resolver) != resolver:
-        raise RuntimeError("the selected guard deployment has no local tools/datadir.py")
-    info = os.lstat(resolver)
-    if getattr(info, "st_file_attributes", 0) & 0x400:
-        raise RuntimeError("the selected resolver is a redirected file")
-    entries = _run(["git", "ls-files", "--stage", "-z", "--", "tools/datadir.py"], deployment).split("\0")
-    entries = [entry for entry in entries if entry]
-    if len(entries) != 1 or entries[0].split("\t", 1)[0].split()[0] not in ("100644", "100755"):
-        raise RuntimeError("the selected tools/datadir.py is not a tracked regular source file")
-    return resolver
-
-
-def _resolve_companion(start):
-    """Ask the intended deployment's resolver for the writer's actual DATA destination."""
-    target = os.path.realpath(_repo_root(start))
-    resolver = _resolver_path(target)
-    spec = importlib.util.spec_from_file_location("_data_boundary_datadir", resolver)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    fn = getattr(mod, "resolve_data_dir", None)
-    if fn is None:
-        raise RuntimeError("the selected resolver has no resolve_data_dir API")
-    destination = fn(os.path.basename(target))
-    return str(destination) if destination else None
 
 
 def _github_repo_key(url):
@@ -929,10 +846,8 @@ def _private_signature(context, configurations):
 def prove_private_companion(destination, visibility_map=None):
     """Prove current PRIVATE publication routes without scanning or modifying DATA.
 
-    Local built-in Git discovery/configuration reads precede transport attestation.
-    This delegates to the same physical/effective policy as the companion audit;
-    it never invokes SSH, a remote helper, or a network operation. The commit-time
-    publication guard and the companion audit use it; it is not a write-time check.
+    Reads local Git configuration only; it never invokes SSH, a remote helper, or a network
+    operation. Used by the commit-time publication guard and fleet_sync, not at write time.
     """
     from types import MappingProxyType
 
@@ -984,138 +899,6 @@ def read_private_companion_git(proof, *arguments):
     if _private_signature(proof._context, _private_configurations(proof._context)) != proof.signature:
         raise GitError("Companion configuration changed during read-only query")
     return result
-
-
-# ------------------------------------------------- live visibility through the gh CLI, any account
-# WHY THIS EXISTS. Consumers that confirm a receipt with a live `gh repo view OWNER/NAME` used to
-# ask with whatever account gh had ACTIVE. gh keeps one active account per host for the whole
-# machine, and any session may run `gh auth switch`. On 2026-10-09 another session switched the
-# active account to one that cannot see the private companion, and every reminder tick failed
-# closed with "PRIVATE repository proof unavailable" until someone switched it back. The proof
-# was asking "can the active account see it", which is not the question.
-#
-# Visibility is a property of the repository, not of the account asking. Any logged-in account
-# that can see the repository gets the same authoritative answer, so this asks with each one in
-# turn: the account named like the owner first (the likely one, and one keyring read), then every
-# other logged-in account, then whatever gh would use by default (an explicit GH_TOKEN, or the
-# active account). The token is borrowed for one child process through GH_TOKEN; gh's global
-# active account is never read or changed, and no token is ever printed, logged or put in an
-# error. Only an answer whose nameWithOwner names the requested repository counts. If no
-# candidate can answer, the result is an exception, never a guess.
-_GH_TOKEN_ENV = {"gh_token", "github_token", "gh_enterprise_token", "github_enterprise_token", "gh_host"}
-_GH_REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
-_GH_LOGGED_IN = re.compile(r"Logged in to github\.com (?:account|as) ([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\b")
-_GH_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
-
-
-def _gh_environment(token=None, ambient=False):
-    """A child environment that selects exactly one credential, or gh's own default."""
-    if ambient:
-        environment = dict(os.environ)
-    else:
-        environment = {key: value for key, value in os.environ.items()
-                       if key.casefold() not in _GH_TOKEN_ENV}
-    environment.update(GH_HOST="github.com", GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1")
-    if token is not None:
-        environment["GH_TOKEN"] = token
-    return environment
-
-
-def _gh_capture(gh, arguments, environment, timeout):
-    """Run gh and return (status, stdout); None when it could not run at all."""
-    try:
-        result = subprocess.run([gh, *arguments], capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", env=environment, timeout=timeout,
-                                stdin=subprocess.DEVNULL, **_no_window())
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    return result.returncode, result.stdout
-
-
-def _gh_logged_in_accounts(gh, timeout):
-    """Logins gh holds for github.com in its own store; ambient tokens are excluded on purpose."""
-    captured = _gh_capture(gh, ["auth", "status", "--hostname", "github.com"],
-                           _gh_environment(), timeout)
-    if captured is None:
-        return []
-    # gh exits nonzero when any stored account fails validation; the others are still listed.
-    accounts = []
-    for login in _GH_LOGGED_IN.findall(captured[1]):
-        if login.casefold() not in {account.casefold() for account in accounts}:
-            accounts.append(login)
-    return accounts
-
-
-def _gh_account_token(gh, login, timeout):
-    captured = _gh_capture(gh, ["auth", "token", "--hostname", "github.com", "--user", login],
-                           _gh_environment(), timeout)
-    if captured is None or captured[0] != 0:
-        return None
-    token = captured[1].strip()
-    if not token or any(character.isspace() or ord(character) < 33 for character in token):
-        return None
-    return token
-
-
-def _gh_visibility_answer(gh, repository, environment, timeout):
-    captured = _gh_capture(gh, ["repo", "view", repository, "--json", "nameWithOwner,visibility"],
-                           environment, timeout)
-    if captured is None or captured[0] != 0:
-        return None
-    try:
-        response = json.loads(captured[1])
-    except ValueError:
-        return None
-    if (not isinstance(response, dict) or not isinstance(response.get("nameWithOwner"), str)
-            or response["nameWithOwner"].casefold() != repository.casefold()
-            or response.get("visibility") not in {"PRIVATE", "PUBLIC", "INTERNAL"}):
-        return None
-    return response["visibility"]
-
-
-def query_github_visibility(repository, *, timeout=20):
-    """Return GitHub's visibility for OWNER/NAME ("PRIVATE", "PUBLIC" or "INTERNAL").
-
-    Independent of which gh account is active: asks with the owner's stored account, then every
-    other stored account, then gh's default credential, and returns the first answer that names
-    the requested repository. Raises GitError when no candidate can see it. Never prints a token.
-    """
-    import shutil
-
-    if (not isinstance(repository, str) or not _GH_REPOSITORY.fullmatch(repository)
-            or repository.split("/")[1] in {".", ".."}):
-        raise GitError("Repository visibility requires a canonical OWNER/NAME")
-    gh = shutil.which("gh")
-    if not gh or not os.path.isabs(gh):
-        raise GitError("Repository visibility is unavailable: the gh CLI is not installed")
-    owner = repository.split("/")[0]
-    tried = set()
-    attempts = 0
-
-    def ask(login):
-        nonlocal attempts
-        tried.add(login.casefold())
-        token = _gh_account_token(gh, login, timeout)
-        if token is None:
-            return None
-        attempts += 1
-        return _gh_visibility_answer(gh, repository, _gh_environment(token), timeout)
-
-    if _GH_LOGIN.fullmatch(owner):
-        answer = ask(owner)
-        if answer is not None:
-            return answer
-    for login in _gh_logged_in_accounts(gh, timeout):
-        if login.casefold() not in tried:
-            answer = ask(login)
-            if answer is not None:
-                return answer
-    attempts += 1
-    answer = _gh_visibility_answer(gh, repository, _gh_environment(ambient=True), timeout)
-    if answer is not None:
-        return answer
-    raise GitError("Repository visibility is unavailable: no gh credential can see the repository "
-                   "(%d credential(s) asked)" % attempts)
 
 
 _HTTPS_PERFORMANCE_KEYS = {
@@ -1372,79 +1155,6 @@ def _companion_visibility_once(root, visibility_map, env):
     return sorted(proven), sorted(set(errors))
 
 
-def check_companion(companion, max_report, visibility_map=None):
-    """Is the PRIVATE companion repo's real-run output actually under version control?
-
-    THIS IS NOT THE SAME QUESTION AS THE ONE ABOVE, and conflating them has already caused one
-    wrong verdict in this fleet. The rule is "DATA never in a PUBLIC repo", not "DATA never in
-    git": a private companion repo is exactly where a person's real output legitimately lives, with
-    a remote, a history and a backup. So this check does not object to run output being tracked
-    there. It objects to run output being NEITHER tracked NOR ignored -- sitting loose in the
-    working tree, in a limbo where it is not backed up by anything and where it buries `git status`
-    under so much noise that a genuinely new file cannot be seen. Measured on the operator's
-    companion 2026-08-27: 35 loose run trees, 1640 files, 1.5 GB, against 40 tracked files. The
-    signal-to-noise ratio of `git status` there was 0.
-
-    Deliberately opt-in (`--companion`) and deliberately NOT part of the public repo's CI: there is
-    no companion on a CI runner, and a check that cannot run must say so rather than pass. Absent
-    companion exits 3, which is neither clean nor a violation.
-    """
-    try:
-        destination = os.path.realpath(companion)
-        context = _companion_git_context(destination)
-        root, _physical, effective = context
-        proven, visibility_errors = _companion_visibility(root, visibility_map, context)
-        if visibility_errors:
-            for error in visibility_errors:
-                print("data_boundary --companion: VISIBILITY BLOCKED: %s" % error, file=sys.stderr)
-            return 1
-        print("data_boundary --companion: PRIVATE verified: %s" % ", ".join(proven))
-        print("  verified DATA destination: %s" % destination)
-        status = _run(["git", "status", "--porcelain", "--untracked-files=all", "-z"], root, env=effective)
-        tracked_files = {p for p in _run(["git", "ls-files", "-z"], root, env=effective).split("\0") if p}
-    except GitError as e:
-        print("data_boundary --companion: SCAN FAILED, NOTHING was examined.\n  %s" % e,
-              file=sys.stderr)
-        return 2
-
-    loose = sorted(f[3:] for f in status.split("\0") if f.startswith("?? "))
-    loose_shaped = [f for f in loose if shape_of(f) and not f.endswith("/")]
-    # `git status -z` reports an untracked DIRECTORY as one entry ending in `/`; expand it so the
-    # count is files, not directories. A directory reported as "1 item" is how 1640 files hide.
-    for d in [f for f in loose if f.endswith("/")]:
-        for r, _dirs, fs in os.walk(os.path.join(root, d)):
-            for x in fs:
-                rel = os.path.relpath(os.path.join(r, x), root).replace("\\", "/")
-                if shape_of(rel):
-                    loose_shaped.append(rel)
-    tracked_shaped = [f for f in tracked_files if shape_of(f)]
-
-    print("data_boundary --companion: %s" % root)
-    print("  tracked files wearing a run shape:  %d   (correct: this is the private repo)"
-          % len(tracked_shaped))
-    print("  LOOSE files wearing a run shape:    %d   (neither tracked nor ignored)"
-          % len(loose_shaped))
-    if not loose_shaped:
-        return 0
-
-    shown = sorted(loose_shaped)[:max_report]
-    for f in shown:
-        print("    %s" % f, file=sys.stderr)
-    withheld = len(loose_shaped) - len(shown)
-    # The bound and what it dropped are both printed. A listing that silently stops at N teaches
-    # the reader that N is the whole answer.
-    print("    ... %d more not listed (--max-report %d)" % (withheld, max_report), file=sys.stderr)
-    print("\n%d file(s) of real-run output are loose in %s: not tracked, and not ignored either.\n"
-          "Decide, do not drift. Both dispositions are legitimate in a PRIVATE repo:\n"
-          "  TRACK   if the files are curated output you would want to diff and restore.\n"
-          "  IGNORE  if they are per-run scratch: raw third-party captures, fetch logs, stderr\n"
-          "          dumps, one-off scripts. Check first that the curated record is already\n"
-          "          tracked, then add the pattern to that repo's .gitignore.\n"
-          "Leaving them loose is the one option that is not a decision."
-          % (len(loose_shaped), root), file=sys.stderr)
-    return 1
-
-
 def check_run_shape_probes(root, m, out, phase_blocking=False):
     """Has the shape list ever been held against THIS repo's real output?
 
@@ -1475,10 +1185,8 @@ def check_run_shape_probes(root, m, out, phase_blocking=False):
     the way a .pii-allow entry is reviewed, in the diff, by a person. What it does remove is the
     silent case, where nobody had to decide anything at all.
 
-    `phase_blocking` stays False until a repo's list is filled. Both vendored hooks end in
-    `[ "$rc" -eq 0 ] && exit 0` followed by exit 1, so flipping this on globally while 17 repos
-    carry empty lists would be 17 simultaneously broken work trees whose only reachable fix is
-    --no-verify. The flip condition is mechanical: list non-empty and every probe matching.
+    `phase_blocking` stays False until a repo's list is filled; the flip condition is list
+    non-empty and every probe matching.
     """
     probes = m.get("_run_shape_probes")
     if probes is None or not [p for p in probes if str(p).strip()]:
@@ -1617,16 +1325,6 @@ def main(private_proof=None):
                          "it recognises none of them.")
     ap.add_argument("--require-hit", action="store_true",
                     help="with --explain, exit 1 when no supplied name matched any shape")
-    ap.add_argument("--companion", action="store_true",
-                    help="also audit the PRIVATE companion repo for run output that is neither "
-                         "tracked nor ignored (exit 3 if no companion resolves: NOTHING checked)")
-    ap.add_argument("--companion-dir", metavar="PATH",
-                    help="the companion to audit; attest data/ when present, otherwise this path")
-    ap.add_argument("--visibility-map", metavar="PATH",
-                    help="companion visibility receipt (default: ~/.pii-guard/visibility.json); "
-                         "all effective remote destinations must have fresh PRIVATE evidence")
-    ap.add_argument("--max-report", type=int, default=20,
-                    help="cap the --companion listing (the cap and the count withheld are printed)")
     ap.add_argument("--calibration", action="store_true",
                     help="also say whether this repo's run-shape probe list has ever been filled. "
                          "Off by default: it never blocks, so printing it every run turns it into "
@@ -1640,25 +1338,6 @@ def main(private_proof=None):
         hits = explain(a.explain)
         return 1 if (a.require_hit and hits == 0) else 0
 
-    if a.companion or a.companion_dir:
-        # Deliberately opt-in and deliberately NOT in CI: there is no companion on a CI runner, and
-        # a check that cannot run must say so rather than pass. Exit 3 when none resolves.
-        try:
-            comp = a.companion_dir or _resolve_companion(os.path.abspath(a.repo))
-        except (RuntimeError, OSError, ImportError) as error:
-            print("data_boundary --companion: RESOLVER BLOCKED: %s" % error, file=sys.stderr)
-            return 2
-        if a.companion_dir and os.path.isdir(os.path.join(comp, "data")):
-            comp = os.path.join(comp, "data")
-        if comp is None:
-            print("data_boundary --companion: no private companion repo resolved, so\n"
-                  "  NOTHING was examined. This is not a clean bill of health. Point\n"
-                  "  $%s_CONFIG at it, or pass --companion-dir."
-                  % os.path.basename(os.path.abspath(a.repo)).upper().replace("-", "_"),
-                  file=sys.stderr)
-            return 3
-        return check_companion(comp, a.max_report, a.visibility_map)
-
     try:
         root = _repo_root(os.path.abspath(a.repo))
         files = tracked(root)
@@ -1670,15 +1349,7 @@ def main(private_proof=None):
         return 2
 
     if not files:
-        # AN EMPTY FILE LIST IS NOT A CLEAN REPO (promoted from daily-hotspots 2026-08-29, negative
-        # control: tools/test_data_boundary.py::test_zero_tracked_files_is_not_a_clean_bill_of_health).
-        #
-        # `git ls-files` can exit 0 and hand back nothing: a fresh work tree, an index git rebuilt
-        # as empty, a `--repo` pointed one directory off. Every per-file check below then iterates
-        # zero times and the summary printed "clean (... 0 tracked files ...)" with rc=0. A count
-        # inside a success message was the ONLY thing separating that from a real pass, and this
-        # file's own `_run` docstring is a paragraph about how that exact shape was the defect on
-        # the primary control. Same verdict as an unusable git, because it is the same fact.
+        # An empty file list is not a clean repo: every check below would iterate zero times.
         print("data_boundary: 0 tracked files in %s, so NOTHING was examined. This is not a clean\n"
               "  bill of health, the scan had no input. Check that --repo names the work tree you\n"
               "  meant and that the index is populated (`git ls-files | head`)." % root,
@@ -1688,24 +1359,7 @@ def main(private_proof=None):
     m = load_manifest(root)
     manifest_absent = m is None
     if manifest_absent:
-        # A MISSING MANIFEST USED TO DISARM THE WHOLE GATE (promoted 2026-08-29, negative controls:
-        # test_no_manifest_does_not_launder_a_tracked_run_artifact and
-        # test_no_manifest_is_reported_as_not_armed_not_as_clean).
-        #
-        # The old body returned 0 right here, so the one-line route past the primary control was
-        # `rm .dataclass.json`: the repo could then track an entire real archive and both hooks
-        # would report success. Measured 2026-08-29 in a scratch repo: a tracked
-        # `metrics/verdicts.jsonl` is 2 violations with the manifest present and rc=0 with it
-        # deleted, the file still tracked either way. That the fail-open was KNOWN is written into
-        # CI: .github/workflows/pii-guard.yml carries a `test -f .dataclass.json` step whose error
-        # text says data_boundary "would exit 0 on every run and leave the primary control inert".
-        # A workaround in one caller is not a property of the gate, and the hooks never had it.
-        #
-        # Check 4 is manifest-INDEPENDENT by construction: it runs off the tracked file list and
-        # asks whether anything WEARS the shape of run output. So it still runs, against an empty
-        # manifest, and a run artifact is still caught. Only the declaration-driven checks (1, 2,
-        # 3, 5) are genuinely unanswerable without a manifest, and that is reported as NOT ARMED
-        # with its own exit code rather than as a pass.
+        # A missing manifest is NOT ARMED (exit 3), never a pass. Check 4 needs no manifest and still runs.
         m = {}
 
     out = []
@@ -1749,22 +1403,7 @@ def main(private_proof=None):
         return 3
 
     if calib == "uncalibrated" and a.calibration:
-        # ASKED FOR, NOT ANNOUNCED. This line used to print on every run, on the argument that a
-        # report saying only "clean, N files" cannot distinguish a repo with nothing to find from a
-        # shape list that matches nothing. That argument is still true and the line is still here,
-        # behind --calibration.
-        #
-        # What changed is the judgement about an unconditional notice that never blocks. It fires on
-        # most repos, on every single invocation, and nothing about it can ever go red. A notice in
-        # that position is read a handful of times and then becomes background, at which point it is
-        # worse than absent: it occupies the place where a real warning would have been noticed. The
-        # fleet has the same finding written down twice already, in the checks that were demoted to
-        # advisory precisely because a permanent amber gets tuned out.
-        #
-        # The protection did not move. Check 4 still runs on every shape, a missing manifest is
-        # still NOT ARMED, an empty file list is still a scan failure, and a probe list that exists
-        # and does not match is still a VIOLATION. What is now silent is only the absence of a probe
-        # list, which is a question about measurement rather than a finding about this repo.
+        # Only on request: an unconditional notice that never blocks becomes background noise.
         print("data_boundary: NOT CALIBRATED for this repo. The probe list in %s is empty,\n"
               "  so check 4 asserted only that no tracked or physical file matches a list nobody has\n"
               "  held against this skill's own output. Build it by running a real run's\n"

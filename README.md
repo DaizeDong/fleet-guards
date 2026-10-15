@@ -27,8 +27,9 @@ The kit combines structural storage rules, identifier scanning and explicit fail
 
 ## What it is (and isn't)
 
-It is the fleet's security kit: the scanner, the data boundary, the companion resolver, their tests,
-two Git hooks, and a composite CI action, consumed by other repositories as a submodule at `guards/`.
+It is the fleet's security kit: the scanner, the data boundary, the companion resolver, the Git
+hooks, and a composite CI action, consumed by other repositories as a submodule at `guards/`. Only
+repositories that include it are checked; there is no machine-wide hook.
 
 Nine detection rules, implemented as 38 regexes across five tools. What they actually block:
 
@@ -49,8 +50,6 @@ twelve pure text helpers that carry no security role at all.
 
 This repository is a Git/CI toolkit without a Claude Code skill or plugin entrypoint. Style and loading-budget checks belong to `fleet-style`; the original `dash_guard` and `load_budget` split moved 17.5% of this kit into that separate scope. Keep this submodule public so public consumers can fetch it in CI.
 
-The earlier deployment copied 17 files and 7,643 lines per kit across 22 consumers; the historical inventory reported about 191,000 lines on disk. Its installer depended on a manually maintained consumer list. The 2026-08-31 audit found two omitted public repositories with fail-open pre-push hooks. Each consumer now records its dependency as a submodule pointer, making that dependency part of its own source history.
-
 ## Install
 
     git submodule add -b main https://github.com/DaizeDong/fleet-guards.git guards
@@ -61,10 +60,11 @@ installation. A shim must stop if `guards/hooks/<hook>` is missing, then execute
 Git directly at an empty submodule disables the gate silently; the committed shims are what detect
 an incomplete clone.
 
-Companion auditing uses the target's registered fleet-guards submodule, including a custom
-submodule path. A missing checkout or resolver blocks the audit. For a standalone deployment,
-run that repository's own `tools/data_boundary.py`; an external checker will not import a loose
-consumer copy. `--companion-dir` remains available when explicitly selecting the DATA store.
+`hooks/pre-commit` holds the logic for both phases; `hooks/pre-push` re-executes it with
+`--phase pre-push`. The pre-commit phase first asserts the commit identity against
+`~/.pii-guard/identities.conf`, then runs `publication_guard.py`. The pre-push phase skips pushes
+that only delete refs. Both call `python` directly; a missing or broken interpreter returns nonzero
+and blocks.
 
 Use the HTTPS URL in `.gitmodules` so other machines and CI can resolve it. A local SSH host alias caused all three workflows in the first migration to fail with "Could not read from remote repository".
 
@@ -84,11 +84,10 @@ Add the composite action after checkout and Python setup:
       - uses: ./guards/ci/pii-guard
 ```
 
-Run the publication policy and contract by hand from a consumer's root:
+Run the publication policy by hand from a consumer's root:
 
 ```bash
 python guards/tools/publication_guard.py ci
-python guards/tools/test_companion_contract.py
 ```
 
 Normal hooks and CI apply the [publication policy](docs/PUBLICATION_POLICY.md). Current evidence must prove every stored and effective fetch/push destination PRIVATE before private content is admitted. Missing evidence retains full public checks. Manifest, schema, fixture, path and identity requirements still apply to PRIVATE repositories.
@@ -104,12 +103,11 @@ Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always us
 | `tools/publication_guard.py` | Applies proven repository visibility to normal hook and CI policy. |
 | `tools/datadir.py` | The resolver. Decides where real-run output goes, which is always outside the repository. |
 | `tools/fleet_sync.py` | Dispatches verified upstream updates and advances consumer gitlinks. |
-| `tools/test_*.py` | The kit's own suite, including the policy layer whose private half never exists on a runner. |
-| `hooks/` | `pre-commit` and `pre-push`, the bodies the consumer's shims forward into. |
+| `hooks/` | `pre-commit` (both phases) and `pre-push` (re-executes it), the bodies the consumer's shims forward into. |
 | `ci/pii-guard/action.yml` | The composite action every consumer references by local path. |
 | `templates/fleet-sync.yml` | The one workflow a consumer copies to enroll in automatic synchronization. |
 | `templates/upstream-notify.yml` | The workflow a custom or private upstream copies to notify its own consumers. |
-| `COMPANION.md` | The contract between a public repository and its private companion, checked against the resolver by a test. |
+| `COMPANION.md` | The contract between a public repository and its private companion. |
 | `docs/AUTOMATIC_SYNC.md` | How a consumer enrolls, and why the dispatch path is what it is. |
 
 ## How to update a consumer
@@ -141,20 +139,11 @@ directory is ever empty, the answer is `git submodule update --init`, never `--n
 
 ## Starting processes on Windows
 
-Every process the kit starts goes through `_no_window()`, and `tools/test_no_console_window.py`
-fails on any `subprocess` call, `os.system`, `os.popen` or process pool that does not. The reason is
-measured, not theoretical: a console program started by a process with no console of its own
-(`pythonw`, a scheduled task, a service) gets a new console, and Windows shows it as a window. A
-daemon that proved its private companion on every log line ran about 19 git commands per proof and
-opened roughly 9,000 terminal windows in eight hours.
-
-The helper adds `CREATE_NO_WINDOW` only when the calling process has no console. With a console, the
-children share it, nothing opens, and the flag would instead move their unredirected output and
-terminal prompts into a hidden console where a hook's findings could not be read. It refuses
-`DETACHED_PROCESS`, because Windows ignores `CREATE_NO_WINDOW` alongside it and the console-less
-child's own children open windows again, and `CREATE_NEW_CONSOLE`, which is a window by definition.
-Each tool file carries its own copy, because consumers load these files one at a time by path; the
-same test holds every copy identical.
+Every process the kit starts goes through `_no_window()`. A console program started by a process
+with no console of its own (`pythonw`, a scheduled task, a service) otherwise gets a visible window.
+The helper adds `CREATE_NO_WINDOW` only when the calling process has no console, so a hook's
+unredirected output is never hidden, and it refuses `DETACHED_PROCESS` and `CREATE_NEW_CONSOLE`.
+Each tool file carries its own copy, because consumers load these files one at a time by path.
 
 ## Limitations
 
@@ -169,10 +158,10 @@ files cannot slip the change past the scan.
 The kit passed ruff's default rules in that check. A stricter configuration reported 155 requests to replace %-formatting with f-strings. Consumers applying their own lint policy can exclude submodules with `extend-exclude = ["guards", "style"]`.
 
 A module of yours with the same name as one here wins. With the repository's own directory first on
-`sys.path`, `import datadir` resolves to the repository's, not the kit's. A root `conftest.py` also
-wins over the one here. The reverse only happens if you put the kit's path first, which is a choice.
+`sys.path`, `import datadir` resolves to the repository's, not the kit's. The reverse only happens if
+you put the kit's path first, which is a choice.
 
-In that consumer check, new top-level packages and tests were collected normally, `find_packages()` excluded the submodules, and root `pytest` excluded the kit suite while explicit `pytest guards/tools/` collected it. A `pytest.ini` with `testpaths` did not change those results, and tests left the submodules clean.
+The kit ships no tests, so a consumer's `pytest` collects nothing from `guards/`.
 
 **Private facts in prose remain a gap.** Keeping DATA outside public source prevents accidental inclusion of those files. Structural rules recognize identifiers and the private list recognizes configured names, but neither establishes that prose contains no private facts. Public examples must use synthetic data.
 

@@ -6,7 +6,8 @@ Run `python guards/tools/publication_guard.py ci` from a consumer root to apply 
 
 The normal hooks and composite CI action use `publication_guard.py`. A fresh proof must identify
 every stored and effective fetch/push destination as PRIVATE before private content is permitted.
-An explicit push URL must also belong to the proven configured push routes. Local hooks use the
+An explicit push URL must also belong to the proven configured push routes. A push that only
+deletes refs is not scanned. Local hooks use the
 installed visibility receipt; GitHub Actions obtains current repository metadata from the canonical
 GitHub API using its job token. Missing evidence retains the full public checks.
 The metadata client rejects custom CA, proxy and TLS key-log environment settings before any
@@ -38,7 +39,7 @@ index remain in effect for scans of the repository being checked.
 
 ## Private token policies and companion identity
 
-Format-2 private token policies require an integer `count` matching all loaded entries, including the canary. Legacy policies remain readable and report that completeness is unattested. The DATA resolver follows the physical installation when imported through a directory alias and refuses authorization if filesystem resolution fails. Visibility remains a separate companion audit.
+Format-2 private token policies require an integer `count` matching all loaded entries, including the canary. Legacy policies remain readable and report that completeness is unattested. The DATA resolver follows the physical installation when imported through a directory alias and refuses authorization if filesystem resolution fails. Visibility is proven by the publication guard when the companion commits or pushes.
 
 Eligible historical blobs above the 8 MiB scan limit make the history scan incomplete. The API raises `ScanIncompleteError`; the CLI prints `SCAN INCOMPLETE` and exits 2, which blocks publication. A size limit cannot establish that the skipped content is safe. Existing exclusions for known binary extensions remain separate.
 
