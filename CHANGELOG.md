@@ -6,6 +6,19 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Removed
 
+- **No semantic layer in `hooks/pre-push`.** The block that called an optional
+  machine-local semantic gate after the structural scan, including its baseline
+  subtraction for rewritten histories, is gone. It was advisory by design and
+  passed whenever its backend was missing or unsure. `publication_guard.py`
+  therefore no longer returns status 10 for a verified PRIVATE pre-push, since
+  that status existed only to skip the semantic layer; a pass is 0 again. The
+  structural pre-push scan, identity assertion and CI are unchanged.
+- **No `hooks/commit-msg` forwarder.** The optional `.githooks/commit-msg` shim,
+  its README and AUTOMATIC_SYNC instructions, its test and the
+  `write_commit_message_rule` fixture are removed. It forwarded a personal
+  prose rule, not a security property. The missing-guard messages in both hooks
+  now point at `git submodule update --init --recursive` instead of the retired
+  installer.
 - **No runtime PRIVATE proof for consumers.** `fleet_guards.runtime` no longer
   exports `prove_private_companion` or `authorize_artifact_write`, and
   `tools/storage_contract.py` no longer has `authorize_artifact_write` or

@@ -419,7 +419,7 @@ PUBLICATION="$_KIT/tools/publication_guard.py"
 # repo were answering the same question in opposite ways, and the quiet answer sat on the block path.
 if [ ! -f "$GUARD" ] || [ ! -s "$GUARD" ]; then
   echo "BLOCKED: $GUARD is missing or empty, so nothing is checking this commit."
-  echo "Restore it with the pii-guard installer rather than committing blind."
+  echo "Restore the guard kit (git submodule update --init --recursive) rather than committing blind."
   exit 1
 fi
 # A MISSING INTERPRETER MUST FAIL CLOSED. This used to be

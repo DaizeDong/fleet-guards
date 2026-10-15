@@ -222,8 +222,7 @@ def main():
                     != (proof.root, proof.repositories, proof.signature)):
                 print("publication_guard: PRIVATE authorization changed during checks; retry required.")
                 return 2
-        # A distinct successful hook status keeps the public semantic layer out of private pushes.
-        return 10 if result == 0 and arguments.phase == "pre-push" else result
+        return result
     scope = ["--tree", "--staged" if arguments.phase == "pre-commit" else "--history"]
     for name, options in (("pii_guard.py", scope), ("data_boundary.py", [])):
         result = subprocess.run([sys.executable, str(kit / name), "--repo", arguments.repo, *options],

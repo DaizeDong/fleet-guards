@@ -700,37 +700,6 @@ def test_source3_merge_additions_keep_per_file_policy(repo, relative, content, b
     assert bool(out) is expected, out
 
 
-def test_source3_documented_commit_message_shim_forwards_verdict(repo, tmp_path):
-    from pathlib import Path
-    import shutil
-    from make_fixtures import write_commit_message_rule
-    source = Path(GUARD).parent.parent
-    doc = (source / "README.md").read_text(encoding="utf-8")
-    script = doc.split("<!-- optional-commit-msg-shim -->", 1)[1].split("```sh\n", 1)[1].split("```", 1)[0]
-    root = Path(repo.root)
-    (root / ".githooks").mkdir()
-    (root / ".githooks/commit-msg").write_text(script, encoding="utf-8")
-    (root / ".githooks/commit-msg").chmod(0o755)
-    (root / "guards/hooks").mkdir(parents=True)
-    shutil.copyfile(source / "hooks/commit-msg", root / "guards/hooks/commit-msg")
-    machine = tmp_path / "machine-hooks"
-    write_commit_message_rule(machine)
-    repo.git("config", "--global", "core.hooksPath", str(machine))
-    repo.git("config", "core.hooksPath", ".githooks")
-    receipt = tmp_path / "message-rule-called.txt"
-    repo.env.update(FG_SYNTHETIC_RECEIPT=str(receipt), FG_SYNTHETIC_COMMIT_STATUS="0")
-    repo.write("notes.md", "synthetic baseline\n")
-    repo.commit("synthetic accepted message")
-    before = repo.git("rev-parse", "HEAD").stdout
-    repo.env["FG_SYNTHETIC_COMMIT_STATUS"] = "1"
-    repo.write("notes.md", "synthetic change\n")
-    repo.git("add", "notes.md")
-    result = repo.git("commit", "-qm", "synthetic rejected message", allow_fail=True)
-    assert result.returncode != 0
-    assert repo.git("rev-parse", "HEAD").stdout == before
-    assert receipt.read_text(encoding="utf-8").splitlines() == ["called", "called"]
-
-
 def test_source2_future_visibility_cannot_downgrade_linkage(repo, tmp_path):
     vis = write_visibility(tmp_path / "future.json", {
         "example-owner/example-skill": "PUBLIC",

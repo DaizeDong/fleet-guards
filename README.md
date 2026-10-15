@@ -61,23 +61,6 @@ installation. A shim must stop if `guards/hooks/<hook>` is missing, then execute
 Git directly at an empty submodule disables the gate silently; the committed shims are what detect
 an incomplete clone.
 
-To preserve an optional machine-level commit-message rule, also commit the following as
-`.githooks/commit-msg` and mark it executable with `git add --chmod=+x .githooks/commit-msg`.
-Keep `core.hooksPath` set to `.githooks`. Adjust `guards` if the kit has a different submodule path.
-The kit forwarder asks Git for the global hook directory and propagates that rule's exit status.
-
-<!-- optional-commit-msg-shim -->
-```sh
-#!/bin/sh
-ROOT=$(git rev-parse --show-toplevel) || exit 1
-HOOK="$ROOT/guards/hooks/commit-msg"
-if [ ! -f "$HOOK" ]; then
-  echo "commit-msg: the configured guard forwarder is missing" >&2
-  exit 1
-fi
-exec sh "$HOOK" "$@"
-```
-
 Companion auditing uses the target's registered fleet-guards submodule, including a custom
 submodule path. A missing checkout or resolver blocks the audit. For a standalone deployment,
 run that repository's own `tools/data_boundary.py`; an external checker will not import a loose

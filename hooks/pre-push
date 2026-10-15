@@ -33,7 +33,7 @@ PUBLICATION="$_KIT/tools/publication_guard.py"
 # removing tools/pii_guard.py and watching a push carrying an address exit 0 in silence.
 if [ ! -f "$GUARD" ] || [ ! -s "$GUARD" ]; then
   echo "BLOCKED: $GUARD is missing or empty, so nothing is checking this push."
-  echo "Restore it with the pii-guard installer rather than pushing blind."
+  echo "Restore the guard kit (git submodule update --init --recursive) rather than pushing blind."
   exit 1
 fi
 # A MISSING INTERPRETER MUST FAIL CLOSED. This used to be
@@ -68,77 +68,10 @@ fi
 out=$("$PY" "$PUBLICATION" pre-push --repo "$ROOT" --push-destination "${2:-}" 2>&1)
 rc=$?
 [ -n "$out" ] && printf '%s\n' "$out"
-# Status 10 means every publication route was proven PRIVATE and structural checks passed.
-[ "$rc" -eq 10 ] && exit 0
 if [ "$rc" -ne 0 ]; then
   echo ""
   echo "push BLOCKED by publication policy."
   echo "A file edit is NOT a fix once it is in a commit -- rewrite the history (git filter-repo)."
   exit 1
-fi
-
-# --- SEMANTIC layer (operator machine only) ----------------------------------------------------
-# WHY IT IS HERE AND NOT ONLY IN THE MACHINE-WIDE HOOK. Every repo that vendors these hooks sets
-# repo-level core.hooksPath=.githooks, which SHADOWS the machine-wide hook entirely. The identity
-# assertion was duplicated into both places for exactly that reason; the semantic gate never was,
-# so the one layer that reads MEANING rather than shape ran on none of the repos that matter.
-# On 2026-08-30 a commit MESSAGE carried something only this layer could have caught and every
-# structural check passed it clean. That is not a defect in the structural checks: they match
-# shapes, and the class this layer exists for has no shape to match. Both are needed.
-#
-# This paragraph is deliberately vague, and that vagueness is the lesson rather than an accident.
-# A comment that ships into public repos must not describe the thing it protects. Three drafts of
-# this block have now been refused by the very gate they describe: the first named the category,
-# the second quoted a whitelist, the third spelled out a path. Each time the gate was right and the
-# prose was wrong. Note also that the same text passed on most repos before blocking on a couple,
-# so a probabilistic layer catches a class eventually rather than the first time it appears.
-#
-# This layer is NOT vendored, deliberately. It is resolved through an indirection that exists only
-# on a maintainer machine, so it is absent for an outside contributor and this whole block is then
-# a no-op for them, which is exactly the intent. The structural gate above has already run, fail
-# closed, for everyone.
-#
-# ADVISORY BY CONSTRUCTION: it exits 0 when its backend is unavailable, when the push adds no new
-# prose, and when the verdict is unsure. It blocks only on a confident finding.
-SEM="$HOME/.local/bin/semantic-gate"
-if [ -f "$SEM" ]; then
-  z="0000000000000000000000000000000000000000"
-  semrc=0
-  while read -r _lref lsha _rref rsha; do
-    [ "$lsha" = "$z" ] && continue
-    sbase=""
-    if [ "$rsha" = "$z" ] || ! git cat-file -e "${rsha}^{commit}" 2>/dev/null ||
-       ! git merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
-      srange="$lsha --not --remotes"
-      # NOT a fast-forward, and we can still see what the remote has: name it as a baseline so the
-      # gate judges what this push PUBLISHES rather than the whole branch. On a rewritten history
-      # every commit is a new object even where its text is byte for byte what the remote already
-      # serves, and there is no rev-range that says otherwise, so without this a rebase, an amend or
-      # a filter-repo re-judges years of prose that has been public all along.
-      #
-      # Measured 2026-09-10 on a repo rewritten to remove four tokens: 350463 characters judged and
-      # blocked, and the identical judgement run against the PRE-rewrite history already on the
-      # remote blocked the same way, on the same old prose. With the baseline the same push is 623
-      # characters, being exactly the lines that changed. The finding was true of the old prose and
-      # false of the push, and the message this hook prints on a block names --no-verify, so the
-      # shape was actively teaching the bypass.
-      #
-      # Subtraction cannot hide a leak: it only drops lines the baseline already had, and removing a
-      # line is not a disclosure. Verified with a negative control, a synthetic private line in a new
-      # commit, which survived the subtraction and blocked at 0.95.
-      if [ "$rsha" != "$z" ] && git cat-file -e "${rsha}^{commit}" 2>/dev/null; then
-        sbase="$rsha"
-      fi
-    else
-      srange="$rsha..$lsha"
-    fi
-    if [ -n "$sbase" ]; then
-      so=$("$SEM" --repo "$ROOT" --range "$srange" --baseline "$sbase" 2>&1) || semrc=1
-    else
-      so=$("$SEM" --repo "$ROOT" --range "$srange" 2>&1) || semrc=1
-    fi
-    [ -n "$so" ] && printf '%s\n' "$so"
-  done
-  [ "$semrc" -ne 0 ] && exit 1
 fi
 exit 0

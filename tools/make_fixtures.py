@@ -417,15 +417,6 @@ def structural_probe():
     return "# See ~/.claude/scripts/synthetic_fixture.py\n"
 
 
-def write_commit_message_rule(root):
-    path = Path(root) / "commit-msg"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('#!/bin/sh\nprintf "called\\n" >> "$FG_SYNTHETIC_RECEIPT"\n'
-                    'exit "$FG_SYNTHETIC_COMMIT_STATUS"\n', encoding="utf-8")
-    path.chmod(0o755)
-    return path
-
-
 def write_encoded_record(root, relative, lines, encoding="utf-8"):
     """Generate a text fixture in an editor-supported encoding, without platform newlines."""
     path = Path(root) / relative
