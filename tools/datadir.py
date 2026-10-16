@@ -24,8 +24,7 @@ raises DataDirResolutionError instead of falling through to the next step):
   4. None                                    -> the tool is UNINITIALIZED, which is exactly what a
                                                 freshly cloned public skill SHOULD be
 
-There is no location after the sibling convention: an uninitialized machine answers None, and
-writers raise DataDirNotInitialized with what to set up.
+There is no location after the sibling convention: an uninitialized machine answers None.
 
 WHY STEP 2 EXISTS (added 2026-07-31)
 ------------------------------------
@@ -58,12 +57,10 @@ What this file CAN assert with no map, no network and no git binary is strictly 
 true: a skill's data dir is never inside the skill's OWN repo. Public or private, the tool repo and
 the companion repo are two different repos, and a data dir that resolved into this one is either an
 in-repo fallback or a misconfigured pointer -- the exact shape that put a real SEC contact email in
-a public repo under the label "legacy fallback". That one is checked here, and it raises.
-
-`data_path()` raises a DataDirNotInitialized with instructions rather than silently falling back to a
-path inside the repo. A silent in-repo fallback is how this happened: `reference/config.json` was the
-documented "legacy fallback", and the operator's real SEC contact email ended up committed in it.
-A fallback into the repo is not a convenience, it is the leak.
+a public repo under the label "legacy fallback". That one is checked here, by
+assert_outside_own_repo, and it raises: `reference/config.json` was the documented "legacy
+fallback", and the operator's real SEC contact email ended up committed in it. A fallback into
+the repo is not a convenience, it is the leak.
 
 Consumers reach it through the installed package: fleet_guards.runtime.companion_resolver(
 source_root=<absolute repo root>). Every entry point takes source_root explicitly; nothing is
@@ -72,10 +69,6 @@ inferred from where this file sits. Stdlib only.
 import os
 import re
 from pathlib import Path
-
-
-class DataDirNotInitialized(RuntimeError):
-    pass
 
 
 class DataDirInsideOwnRepo(RuntimeError):
@@ -388,26 +381,3 @@ def resolve_data_dir(skill, *, source_root):
         raise _unproven_error(skill, unproven)
     return None
 
-
-def data_path(skill, relpath, *, source_root):
-    """Resolve <private data dir>/<relpath>. Never returns a path inside the repo."""
-    base = resolve_data_dir(skill, source_root=source_root)
-    if base is None:
-        raise DataDirNotInitialized(
-            "%s has no private data directory, so it has nowhere to put real-run output.\n"
-            "This is the correct state for a freshly cloned public skill: it ships as an\n"
-            "uninitialized tool. Initialize its PRIVATE COMPANION repo first:\n"
-            "    create a PRIVATE repository with an origin and clone it beside this one as %s-config\n"
-            "    or set %s to the companion repo (data/ under it is used when present)\n"
-            "    or set %s to an explicit private directory\n"
-            "A directory in the home folder is not a companion: nothing versions or backs it up.\n"
-            "Real-run output NEVER goes back into THIS repo -- this repo carries only the schema\n"
-            "(<file>.example) and a synthetic fixture set."
-            % (skill, skill, _config_env_var(skill), _env_var(skill)))
-    p = base / relpath
-    assert_outside_own_repo(p, skill, source_root=source_root)
-    try:
-        p.resolve().relative_to(base.resolve())
-    except ValueError:
-        raise ValueError("relpath must stay inside the private data directory") from None
-    return p

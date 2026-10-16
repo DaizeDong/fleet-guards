@@ -14,6 +14,12 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Removed
 
+- `CompanionResolver.data_path`, `datadir.data_path` and `DataDirNotInitialized` (no consumer
+  called or caught them; an uninitialized machine answers None from `resolve_data_dir`); the
+  `stem.example.ext` schema spelling (`<path>.example` is the one name `check_data_has_schema`
+  accepts); `data_boundary`'s own `GitError`, `tracked`, `gitlinks` and `_repo_root` (it uses
+  pii_guard's); the repeat path validation in `check_data_absent_from_worktree` that
+  `validate_declarations` already runs; the unused `root`/`None` form of `_in_submodule`.
 - Unused options and old shapes: `create` on `resolve_data_dir`/`data_path` (no caller ever
   passed it), the `assert_outside_own_repo` wrapper (the function now carries that name), the
   `_armed` manifest key (only `_audited` counts), `data_boundary --require-hit`,

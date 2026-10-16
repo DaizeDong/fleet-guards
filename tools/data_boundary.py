@@ -86,8 +86,10 @@ from dataclasses import dataclass, field
 import pii_guard
 
 
-# pii_guard owns the one copy of the spawn helper and the visibility receipt reader.
+# pii_guard owns the one copy of the spawn helper, the visibility receipt reader, the git error
+# type and the tracked-file, gitlink and work-tree-root enumerations.
 _no_window = pii_guard._no_window
+GitError = pii_guard.GitError
 
 
 MANIFEST = ".dataclass.json"
@@ -206,18 +208,11 @@ RUN_SHAPES = (
 )
 
 
-class GitError(RuntimeError):
-    """A git invocation this check depends on did not succeed.
-
-    Raised, never swallowed. See _run for why an exception and not an empty string.
-    """
-
-
 def _run(args, cwd, env=None):
     """Run a git command and return its stdout.
 
     THIS USED TO FAIL OPEN, and on the PRIMARY control that is worse than on the backstop.
-    The old body was `return p.stdout if p.returncode == 0 else ""`. `tracked()` read that
+    The old body was `return p.stdout if p.returncode == 0 else ""`. The tracked-file list read that
     empty string as an ANSWER (no tracked files), every per-file check then iterated zero
     times, and main() printed "data_boundary: clean (... 0 tracked files ...)" and exited 0
     having examined nothing. Anything that breaks git produced that: a shell .git directory
@@ -248,52 +243,12 @@ def _run(args, cwd, env=None):
     return p.stdout
 
 
-def _repo_root(start):
-    """Resolve the work tree root, or raise.
-
-    The old body ended in `or start`, so a directory that is not a work tree quietly became
-    its own "repo root". Everything downstream then scanned a non-repo and reported clean.
-    That is the same defect pii_guard was fixed for; refusing here is the whole point.
-    """
-    root = _run(["git", "rev-parse", "--show-toplevel"], start).strip()
-    if not root:
-        raise GitError("git named no toplevel for %s (is it a work tree?)" % start)
-    return root
-
-
 def load_manifest(root):
     p = os.path.join(root, MANIFEST)
     if not os.path.isfile(p):
         return None
     with open(p, encoding="utf-8") as f:
         return json.load(f)
-
-
-def tracked(root):
-    """Every git-tracked path, NUL-separated so non-ASCII names survive.
-
-    Why -z: `git ls-files` without it renders any path containing a non-ASCII byte as a
-    C-quoted escape string (quotes included, e.g. "ä¸­...md"). Those strings are
-    not paths. They do not open, and every regex anchored on a real suffix misses them.
-    Callers read this list as an ANSWER, so such a file got counted in the tracked total and
-    then silently excluded from every per-file match. Measured 2026-08-19: a tracked
-    metrics/<CJK>-live-runs.jsonl produced "clean (... 3 tracked files carry no real-run
-    shape)" with rc=0, while byte-identical content under an ASCII name produced rc=1.
-    -z makes git emit raw bytes with NUL separators, so the name round-trips.
-    """
-    return {p for p in _run(["git", "ls-files", "-z"], root).split("\0") if p}
-
-
-def gitlinks(root):
-    """Return submodule paths and object IDs recorded by the parent index."""
-    result = {}
-    for entry in _run(["git", "ls-files", "--stage", "-z"], root).split("\0"):
-        if entry:
-            metadata, path = entry.split("\t", 1)
-            mode, sha, stage = metadata.split()
-            if mode == "160000" and stage == "0":
-                result[path] = sha
-    return result
 
 
 def _covered(rel, pats):
@@ -332,7 +287,7 @@ def physical_paths(root):
     def scan_error(error):
         raise error
 
-    submodules = gitlinks(root)
+    submodules = pii_guard._submodule_paths(root)
     for directory, dirs, files in os.walk(root, followlinks=False, onerror=scan_error):
         descend = []
         for name in sorted(dirs + files):
@@ -381,9 +336,6 @@ def check_data_absent_from_worktree(root, m, out):
     prefixes = []
     for pattern in pats:
         parts = pattern.split("/")
-        if not pattern or os.path.isabs(pattern) or ".." in parts or "\\" in pattern:
-            out.append(("DATA-PATH", pattern, "DATA declarations must be repository-relative paths"))
-            return
         literal = []
         for part in parts:
             if any(char in part for char in "*?["):
@@ -429,15 +381,13 @@ def check_data_has_schema(root, m, out):
     expects", and the next person to wire it up guesses -- or, far more likely, an agent recreates a
     convenient real-looking file to work against. The schema is what makes the empty tool honest.
 
-    Both conventions are accepted: `x.jsonl.example` and the older `config.example.json`. A DATA path
-    ending in `/` is a whole output directory; there is no single shape to publish for it.
+    The schema is `<path>.example`, for example `x.jsonl.example`. A DATA path ending in `/` is a
+    whole output directory; there is no single shape to publish for it.
     """
     for pat in m.get("data", []):
         if pat.endswith("/"):
             continue
-        stem, ext = os.path.splitext(pat)
-        if any(os.path.isfile(os.path.join(root, c))
-               for c in (pat + ".example", stem + ".example" + ext)):
+        if os.path.isfile(os.path.join(root, pat + ".example")):
             continue
         out.append(("NO-SCHEMA", pat + ".example",
                     "publish the schema so the tool is usable uninitialized"))
@@ -1243,8 +1193,8 @@ def main(private_proof=None):
         return 0
 
     try:
-        root = _repo_root(os.path.abspath(a.repo))
-        files = tracked(root)
+        root = pii_guard._repo_root(os.path.abspath(a.repo))
+        files = set(pii_guard.tracked_files(root))
     except GitError as e:
         # Exit 2, distinct from 0 (clean) and 1 (violations), mirroring pii_guard. "clean" and
         # "never ran" must not be the same output on the primary control.

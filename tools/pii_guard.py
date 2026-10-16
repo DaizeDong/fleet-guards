@@ -64,7 +64,8 @@ present, a count it compares, and a probe that the matcher can still say yes. An
 verify raises and exits 2, because an unverifiable policy is an absent scan wearing a green light.
 
 USAGE
-  python pii_guard.py --tree               # fast: git-tracked working tree (pre-commit)
+  python pii_guard.py --staged             # what is being committed (pre-commit)
+  python pii_guard.py --tree               # on demand: git-tracked working tree
   python pii_guard.py --tree --history     # full: + every blob/message/author in history (pre-push)
   python pii_guard.py --tree --history --repo /path/to/repo
   python pii_guard.py grant --token X --scope history-only --reason "..." \
@@ -409,7 +410,7 @@ def _repo_slug(root):
 
 
 # ================================================================= THE POLICY LAYER (v2)
-# Everything from here to `build_policy` replaces what used to be "a flat list of strings the
+# Everything from here to `load_policy` replaces what used to be "a flat list of strings the
 # operator typed". The redesign is two orthogonal ideas; the rest is bookkeeping.
 #
 # IDEA 1 -- A TOKEN'S JURISDICTION DEPENDS ON WHAT KIND OF THING IT IS.
@@ -1297,10 +1298,8 @@ def _submodule_paths(root):
     return result
 
 
-def _in_submodule(root, rel, submodules=None):
+def _in_submodule(rel, submodules):
     """Recognize top-level or nested gitlinks without caching across scans."""
-    if submodules is None:
-        submodules = _submodule_paths(root)
     return any(rel == path or rel.startswith(path + "/") for path in submodules)
 
 
@@ -1421,7 +1420,7 @@ def scan_tree(root, allow, pol, stats=None):
         counts["enumerated"] += 1
         # Published names are text even when their bodies are binary, excluded, or unreadable.
         scan_text(rel, "%s (path)" % rel, allow, pol, out, domain="tree", path_text=True)
-        if any(part in SKIP_DIR for part in rel.split("/")) or _in_submodule(root, rel, submodules):
+        if any(part in SKIP_DIR for part in rel.split("/")) or _in_submodule(rel, submodules):
             counts["skipped_dir"] += 1
             continue
         if os.path.splitext(rel)[1].lower() in BINARY_EXT:

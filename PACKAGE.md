@@ -7,8 +7,8 @@ canonical tools used by Python consumers. Install it editable from the machine's
 
 `fleet_guards.runtime` loads `tools/datadir.py` and `tools/storage_contract.py`, packaged as
 `fleet_guards._tools`. The editable install maps that package to the checkout's `tools/`, so there
-is one implementation; a built wheel (the runtime generation) carries a copy of the same files. If the package cannot find them it raises
-`ImportError` telling you to run the install command above. Importing the package does
+is one implementation; a built wheel (the runtime generation) carries a copy of the same files. If they are missing, the import
+fails with `ModuleNotFoundError`. Importing the package does
 not load the resolver. Git hooks run from the same checkout through each consumer's `.githooks/`
 shims.
 

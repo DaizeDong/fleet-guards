@@ -34,10 +34,6 @@ class CompanionResolver:
         return _canonical("datadir").assert_outside_own_repo(
             path, skill, source_root=self.source_root)
 
-    def data_path(self, skill, relative_path):
-        return _canonical("datadir").data_path(
-            skill, relative_path, source_root=self.source_root)
-
 
 def companion_resolver(*, source_root):
     """Bind discovery to an explicit consumer source root, never the Guards installation."""

@@ -35,8 +35,8 @@ directory. Discovery proves the companion identity described below; PRIVATE publ
 There is no home-directory location. `~/.<skill>-config` and `~/.<skill>-data` were probed until
 2026-10-12 and are not any more: a directory in the home folder is not a repository, so nothing
 versioned, backed up or pushed what a skill wrote there. A machine with neither a variable nor a
-sibling companion is uninitialized; readers report that, and writers raise `DataDirNotInitialized`
-with how to create the companion.
+sibling companion is uninitialized: `resolve_data_dir` answers None, and the consumer reports how
+to create the companion.
 
 Two properties of this list are load bearing and were each added after a measured failure.
 
