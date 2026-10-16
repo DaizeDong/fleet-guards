@@ -337,52 +337,6 @@ def _file_handle(path, *, directory=False, read_only=False, delete=False):
 
 
 @contextmanager
-def exclude_file_writes(paths):
-    """Hold Windows write/delete exclusion on every member until context exit.
-
-    Read-only access permits normal readback while share flags exclude ordinary
-    writes (including through hard links) and deletion/replacement of each held
-    pathname. NTFS may unlink an unheld alias without deleting the held member.
-    Unsupported platforms fail before the caller may publish anything.
-    """
-    if os.name != 'nt':
-        raise OSError('file_exclusion_unavailable')
-    paths = [validate_path(path) for path in paths]
-    with ExitStack() as stack:
-        stack.enter_context(_pin_parents(*paths))
-        opened = {}
-        for path in paths:
-            handle = stack.enter_context(_file_handle(path, read_only=True))
-            with _duplicate_reader(handle) as stream:
-                opened[path] = _stat_identity(os.fstat(stream.fileno()))
-        yield opened
-
-
-def delete_if_identity_matches(path, expected_identity, *, directory=False):
-    """Delete only the opened owned object; directories must already be empty.
-
-    Content is intentionally not an ownership test: an owned hard link may have
-    changed through its now-active target. Foreign replacements are preserved.
-    """
-    if os.name != 'nt':
-        return False
-    import ctypes
-    try:
-        path = validate_path(path)
-        with _pin_parents(path), _file_handle(path, directory=directory, delete=True) as handle:
-            info = path.lstat()
-            correct_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-            if [info.st_dev, info.st_ino] != expected_identity or not correct_type:
-                return False
-            disposition = ctypes.c_int(1)
-            if not _kernel().SetFileInformationByHandle(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
-                raise ctypes.WinError(ctypes.get_last_error())
-        return True
-    except OSError:
-        return False
-
-
-@contextmanager
 def _pin_parents(*paths):
     with ExitStack() as stack:
         if os.name == 'nt':

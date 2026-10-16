@@ -1,8 +1,9 @@
 """Consumer access to the canonical companion resolver and storage contract.
 
-The modules are loaded from tools/ of the fleet-guards checkout this package is editable-installed
-from (pip install -e "$(git config --get fleet.guards)"). PRIVATE publication is enforced at commit
-time by the consumer's .githooks shims, not by a runtime proof.
+The modules are the checkout's tools/, packaged as fleet_guards._tools: an editable install
+(pip install -e "$(git config --get fleet.guards)") maps it to the checkout, and a built wheel
+carries a copy. PRIVATE publication is enforced at commit time by the consumer's .githooks shims,
+not by a runtime proof.
 """
 from dataclasses import dataclass
 import importlib.util
@@ -11,7 +12,6 @@ import sys
 import threading
 
 _LOAD_LOCK = threading.RLock()
-_TOOLS = Path(__file__).resolve().parent.parent / "tools"
 
 
 def _canonical(name):
@@ -20,11 +20,14 @@ def _canonical(name):
 
 
 def _load_canonical(name):
-    path = _TOOLS / (name + ".py")
-    if not path.is_file():
+    spec = importlib.util.find_spec("fleet_guards._tools")
+    locations = list(spec.submodule_search_locations or []) if spec else []
+    path = Path(locations[0]) / (name + ".py") if locations else None
+    if path is None or not path.is_file():
         raise ImportError(
-            "fleet_guards cannot find %s; install it editable from the checkout: "
-            'pip install -e "$(git config --get fleet.guards)"' % path)
+            "fleet_guards cannot find _tools/%s.py; reinstall it from the checkout: "
+            'pip install -e "$(git config --get fleet.guards)"' % name)
+    path = path.resolve()
     key = "_fleet_guards_canonical_" + name
     previous = sys.modules.get(key)
     if previous is not None and Path(previous.__file__).resolve() == path:

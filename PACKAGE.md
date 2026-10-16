@@ -1,12 +1,13 @@
 # Shared Python API
 
-Version 0.2.1 packages the credential scanner, filesystem primitives and runtime access to the
+Version 0.3.0 packages the credential scanner, filesystem primitives and runtime access to the
 canonical tools used by Python consumers. Install it editable from the machine's checkout:
 
     pip install -e "$(git config --get fleet.guards)"
 
-`fleet_guards.runtime` loads `tools/datadir.py` and `tools/storage_contract.py` from that checkout,
-so there is one implementation and no second copy. If the package cannot find them it raises
+`fleet_guards.runtime` loads `tools/datadir.py` and `tools/storage_contract.py`, packaged as
+`fleet_guards._tools`. The editable install maps that package to the checkout's `tools/`, so there
+is one implementation; a built wheel (the runtime generation) carries a copy of the same files. If the package cannot find them it raises
 `ImportError` telling you to run the install command above. Importing the package or its CLI does
 not load the resolver. Git hooks run from the same checkout through each consumer's `.githooks/`
 shims.
@@ -82,8 +83,6 @@ prints metadata JSON. Exit codes are 0 for clean, 1 for findings and 2 for failu
 | `create_no_replace_with_identity(...)` | Return the staging object's device/inode identity, or `None` on collision. |
 | `identity(path)` / `sync_directory(path)` | Read regular-file identity / apply the supported directory durability operation. |
 | `detach_if_matches(...)` | On Windows, retain a matching object using handle-based exclusion; conflicts return `False`. |
-| `exclude_file_writes(paths)` | Hold Windows write/delete exclusion while the caller operates; unsupported platforms raise. |
-| `delete_if_identity_matches(...)` | Delete only the matching opened Windows object; conflicts or unsupported platforms return `False`. |
 | `link_no_replace(source, destination)` | Create a no-replace link in a trusted directory; collisions return `False`. |
 | `assert_same_volume(source, destination)` | Refuse a known or unprovable cross-volume operation. |
 

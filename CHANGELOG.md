@@ -4,8 +4,20 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ## [Unreleased]
 
+### Changed (0.3.0)
+
+- **Wheels carry the canonical tools.** `tools/` is packaged as `fleet_guards._tools`
+  (editable installs map it to the checkout), and `fleet_guards.runtime` finds
+  `datadir.py` and `storage_contract.py` through that package. A regular wheel, as the
+  runtime generation builds, used to fail with `ImportError` because the loader looked
+  for `tools/` beside the installed package.
+
 ### Removed
 
+- `pii_guard.py --range` and `scan_range()`: only the retired machine-level push
+  scan used them. Commit runs `--staged`, push runs `--tree --history`.
+- `fleet_guards.filesystem.exclude_file_writes` and `delete_if_identity_matches`,
+  which nothing called.
 - **No submodule, no CI, no automatic sync.** The kit now runs only from one
   local checkout per machine, named by the global git config key `fleet.guards`;
   consumers opt in with `.githooks/` shims that read that key and block when it

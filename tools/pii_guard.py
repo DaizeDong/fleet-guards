@@ -424,7 +424,7 @@ def _repo_slug(root):
 # that repo was created, and the only remedy on offer was rewriting history over a name. So a
 # token now carries a `kind`, and the scan DOMAIN decides the force:
 #
-#     kind          tree/staged/range        history
+#     kind          tree/staged              history
 #     secret        BLOCK                    BLOCK
 #     linkage       BLOCK                    DEBT   (reported and counted, does not gate)
 #     derived       WARN                     WARN
@@ -473,7 +473,7 @@ MATCHER_PROBE_ALPHA = "zzmatcherprobealpha"
 # The documented naming conventions for a private companion of a public repo. Adding a suffix
 # here widens what counts as derivable, so it is a deliberate, reviewable act.
 CONVENTION_SUFFIXES = ("-config", "-data", "-private", "-secrets")
-DOMAINS = ("tree", "staged", "range", "history")
+DOMAINS = ("tree", "staged", "history")
 
 
 _UNATTESTED_NOTE = (
@@ -1836,42 +1836,6 @@ def _scan_changed_files(root, files, parents, allow, pol, out, where, domain):
                           domain=domain, deny_only=deny_only)
 
 
-def _scan_commit_changes(root, commit, allow, pol, out, where):
-    """Compare decoded commit blobs with all parents, including root commits."""
-    parent_ids = _run(["git", "rev-list", "--parents", "-n", "1", commit], root).split()[1:]
-    parents = [_commit_files(root, parent) for parent in parent_ids] or [{}]
-    files = _commit_files(root, commit)
-    _scan_changed_files(root, files, parents, allow, pol, out, where, "range")
-
-
-def _scan_merge_resolutions(root, allow, pol, out, rev_args, where):
-    """Scan lines added relative to every merge parent, with per-file scanner exemptions."""
-    commits = _run(["git", "rev-list", "--merges"] + rev_args, root).split()
-    for commit in commits:
-        _scan_commit_changes(root, commit, allow, pol, out, where)
-
-
-def scan_range(root, allow, pol, rev_range):
-    """Scan added lines, messages and identities in only the commits about to be published.
-
-    Old accepted content and removals are not new disclosures. Decoded blobs establish scanner
-    identity and line differences. A merge line must be new relative to every parent. Paths absent
-    from every parent are new disclosures too, including gitlinks and rename destinations.
-    """
-    out = []
-    args = rev_range.split()
-    messages = _run(["git", "log", "--format=%s%n%b"] + args, root)
-    if messages:
-        scan_text(messages, "<commit message (being pushed)>", allow, pol, out, domain="range")
-    for identity in set(_run(["git", "log", "--format=%ae%n%ce"] + args, root).split()):
-        if identity and not ALLOWED_AUTHOR_EMAIL_RE.search(identity):
-            out.append(("<commit author (being pushed)>", "AUTHOR-EMAIL", identity, "BLOCK"))
-    for commit in _run(["git", "rev-list", "--no-merges"] + args, root).split():
-        _scan_commit_changes(root, commit, allow, pol, out, "<diff (being pushed)>")
-    _scan_merge_resolutions(root, allow, pol, out, args, "<merge resolution (being pushed)>")
-    return out
-
-
 def scan_staged(root, allow, pol):
     """Scan only what is staged -- the pre-commit gate.
 
@@ -2029,14 +1993,11 @@ def main():
     ap.add_argument("--repo", default=".")
     ap.add_argument("--tree", action="store_true", help="scan the git-tracked working tree")
     ap.add_argument("--history", action="store_true", help="scan reachable content, identities, tag metadata and ref names")
-    ap.add_argument("--range", dest="rev_range", default=None,
-                    help="scan only the commits in this rev-range (e.g. 'abc..def', or "
-                         "'<sha> --not --remotes').")
     ap.add_argument("--staged", action="store_true",
                     help="scan only what is staged; catching it here means the fix is still an "
                          "EDIT, not a history rewrite.")
     a = ap.parse_args()
-    if not (a.tree or a.history or a.rev_range or a.staged):
+    if not (a.tree or a.history or a.staged):
         a.tree = True
 
     root = _repo_root(os.path.abspath(a.repo))
@@ -2057,8 +2018,6 @@ def main():
         findings += scan_tree(root, allow, pol, stats=tree_stats)
     if a.history:
         findings += scan_history(root, allow, pol, stats=hist_stats)
-    if a.rev_range:
-        findings += scan_range(root, allow, pol, a.rev_range)
     if a.staged:
         findings += scan_staged(root, allow, pol)
 
@@ -2116,7 +2075,6 @@ def main():
 
     if not blocks:
         scope = "+".join([s for s, on in (("tree", a.tree), ("history", a.history),
-                                          ("push-range", bool(a.rev_range)),
                                           ("staged", a.staged)) if on])
         detail = ""
         if a.tree:
