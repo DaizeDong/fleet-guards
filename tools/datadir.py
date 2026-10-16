@@ -12,7 +12,7 @@ No content scanner catches that. There is no email in it, no phone, no ZIP. It i
 operator's life, correctly formatted. The fix is not a better sieve, it is a pipe that does not
 point at the public repo in the first place.
 
-  resolve_data_dir("small-cap-deepdive")  ->  the private directory, or None
+  resolve_data_dir("small-cap-deepdive", source_root=<absolute repo root>)  ->  the private directory, or None
 
 Discovery order (first existing wins; a set environment variable that names a missing directory
 raises DataDirResolutionError instead of falling through to the next step):
@@ -26,16 +26,10 @@ raises DataDirResolutionError instead of falling through to the next step):
 
 There is no location after the sibling convention: an uninitialized machine answers None.
 
-WHY STEP 2 EXISTS (added 2026-07-31)
-------------------------------------
-Every skill in this fleet already resolves its private companion repo from `$<SKILL>_CONFIG`, and
-several of those repos have been pinned somewhere other than the dotfile path (`$MARKET_INTEL_CONFIG`
-and `$DAILY_HOTSPOTS_CONFIG` both point into ~/CodesClaude). This resolver did not know that, so it
-looked only at the dotfile path, found nothing, and answered None -- "uninitialized" -- for skills
-that were writing a real ledger every day. An out-of-band control then asked THIS function where the
-data was, got None, and reported the skill as nothing-to-check. A checker that is told nothing
-reports a clean sheet, which is the failure mode the whole data boundary exists to avoid. The
-resolver now follows the same pointer the skill itself follows.
+WHY STEP 2 EXISTS
+-----------------
+$<SKILL>_CONFIG is the same pointer the skill itself follows, so the resolver honours it before the
+sibling convention.
 
 PRIVATE COMPANION REPO IS THE DESTINATION, NOT AN ACCIDENT
 ----------------------------------------------------------

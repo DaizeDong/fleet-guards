@@ -253,14 +253,15 @@ NOT_A_DOMAIN_RE = re.compile(r"^(pytest|mark|fixture|param|parametrize|patch|moc
 SKIP_DIR = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".pytest_cache"}
 # The scanner contains the shapes it detects, so the STRUCTURAL checks skip it. The PRIVATE DENYLIST
 # still applies. Keyed on the repo-relative path, not the basename, so renaming a file to
-# pii_guard.py elsewhere buys nothing. The two test names are no longer shipped but remain in the
-# reachable history of this repo and of every formerly vendored consumer, which --history scans.
+# pii_guard.py elsewhere buys nothing. The two test names are no longer shipped but remain in
+# reachable history (this repo's tools/, and skill-smith's skills/skill-smith/assets/pii-guard/),
+# which --history scans; removing them turns both history scans red.
 SCANNER_FILES = {"pii_guard.py", "test_pii_guard.py", "test_pii_guard_v2.py", ".pii-allow"}
 SCANNER_PATHS = {"tools/pii_guard.py", "tools/test_pii_guard.py", "tools/test_pii_guard_v2.py",
                  ".pii-allow"}
 
 
-# The guard's own files carry this marker, and a basename match OUTSIDE the vendored paths is
+# The guard's own files carry this marker, and a basename match OUTSIDE the historical paths is
 # honoured only when the marker is present. That is the difference between exempting a file because
 # of what it IS and exempting it because of what it is CALLED: `git mv secrets.md docs/pii_guard.py`
 # gets nothing, while a legitimate copy at a non-standard path keeps working without anyone
@@ -279,7 +280,7 @@ def _norm_rel(rel):
 
 
 def is_scanner_path(rel):
-    """True for the guard's own files at their vendored paths. Deny-only, never skip-all."""
+    """True for the guard's own files at their historical paths. Deny-only, never skip-all."""
     return _norm_rel(rel) in SCANNER_PATHS
 
 
@@ -292,7 +293,8 @@ def is_scanner_path(rel):
 # blocking findings, all of them synthetic fixtures inside old copies of this very file.
 #
 # So identity is also established INTRINSICALLY, by things only these files contain. A renamed
-# secrets file does not acquire `ALLOWED_EMAIL_DOMAINS` by being renamed.
+# secrets file does not acquire `ALLOWED_EMAIL_DOMAINS` by being renamed. "import pii_guard as g"
+# is what identifies the old test copies under skill-smith's asset path.
 SCANNER_SIGNATURES = (SCANNER_MARKER, "ALLOWED_EMAIL_DOMAINS = {", "import pii_guard as g")
 
 
@@ -509,18 +511,14 @@ class Grant(object):
     exemption needs scope=all AND a separate justification field, because those two words look
     alike and one of them turns the gate off for live content.
     """
-    __slots__ = ("token", "scope", "reason", "used", "live_collisions", "hand_written")
+    __slots__ = ("token", "scope", "reason", "used", "live_collisions")
 
-    def __init__(self, token, scope, reason, hand_written=False):
+    def __init__(self, token, scope, reason):
         self.token = token
         self.scope = scope
         self.reason = reason
         self.used = False
         self.live_collisions = 0
-        # True when the entry carries no nonce, or one that does not match. `grant` always writes a
-        # matching nonce, and it only writes after PROVING the token produces a finding here. So a
-        # mismatch means the line was typed by hand and never went through that proof.
-        self.hand_written = hand_written
 
 
 
@@ -620,15 +618,6 @@ class Policy(object):
         used = sum(1 for g in self.grants if g.used)
         line = ("pii_guard: exemptions -- %d declared, %d suppressed a finding in this run, "
                 "%d never fired" % (len(self.grants), used, len(self.grants) - used))
-        hand = [g for g in self.grants if g.hand_written]
-        if hand:
-            # `grant` writes a nonce only after PROVING the token produces a finding in this repo,
-            # so an entry without a matching one was typed by hand and never went through that
-            # proof. It is still honoured, because refusing it would take away the exit, but the
-            # difference between "a machine verified this was needed" and "somebody wrote it down"
-            # is exactly the sort of thing that should not be invisible.
-            line += ("\n  %d of them carry no valid nonce, so they were written by hand and never"
-                     " passed the proof-of-block scan." % len(hand))
         collided = [g for g in self.grants if g.live_collisions]
         if collided:
             line += ("\n  NOTE %d history-only exemption(s) were hit in a LIVE domain (%d time(s)): "
@@ -1059,19 +1048,11 @@ def load_grants(root, notes):
             if not reason:
                 notes.append("pii_guard: WARNING exemption for %r has no reason, ignored" % tok)
                 continue
-            # The nonce is finally READ. It used to be written by `grant` and then ignored on
-            # load, which made it decoration. `grant` computes it from (repo, token) and only
-            # writes the entry after proving the token really produces a finding in this repo, so
-            # an entry whose nonce is absent or wrong was typed by hand and never went through
-            # that proof. The entry is still honoured, because refusing it would take away the
-            # exit, but it is named on every run. That is the whole protection the deleted
-            # append-only log was supposed to provide, moved into the file people already read.
-            # Reported in the RECEIPT, not as its own WARNING line. A hand-written grant is a
-            # standing fact about a legitimate long-lived exemption, not an event, and a warning
-            # that prints on every single scan of that repo forever is the kind of noise that
-            # trains people to stop reading the output at all.
-            hand = str(e.get("nonce", "")).strip().lower() != _nonce_for(key, tok)
-            grants.append(Grant(tok, scope, reason, hand_written=hand))
+            if str(e.get("nonce", "")).strip().lower() != _nonce_for(key, tok):
+                notes.append("pii_guard: WARNING exemption for %r has no valid nonce (not written "
+                             "by `pii_guard.py grant`), ignored" % tok)
+                continue
+            grants.append(Grant(tok, scope, reason))
     return grants
 
 

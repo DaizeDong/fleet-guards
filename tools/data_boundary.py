@@ -970,7 +970,7 @@ def _companion_visibility_once(root, env):
     """
     try:
         visibility = pii_guard._load_visibility()
-    except (OSError, ValueError, RuntimeError, ImportError, AttributeError):
+    except (OSError, ValueError, pii_guard.PolicyError):
         return [], ["companion visibility receipt could not be verified"]
     if visibility is None:
         return [], ["companion has no visibility receipt; visibility is UNKNOWN"]
