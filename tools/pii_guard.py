@@ -87,11 +87,10 @@ import subprocess
 import sys
 
 
-# ------------------------------------------------- spawning processes (identical in every kit file)
+# ------------------------------------------------- spawning processes (the single copy in the kit)
 # Every spawn goes through _no_window(): a console child of a console-less process (pythonw, a
 # scheduled task) otherwise opens a visible window. The flag is added only when this process has no
-# console, so a hook's unredirected output is never hidden. Each file carries its own copy because
-# the hook runs these files by path and the package imports them individually.
+# console, so a hook's unredirected output is never hidden. data_boundary uses this copy.
 def _console_less_windows():
     """True on Windows when this process has no console, so a console child would get a window.
 
@@ -460,9 +459,6 @@ def _repo_slug(root):
 POLICY_FORMAT_SUPPORTED = 2
 KINDS = ("secret", "linkage", "derived")
 DEFAULT_KIND = "secret"
-# A canary the loader asserts is present. It lives in the SYNTHETIC namespace on purpose: if it
-# ever leaked it would be harmless, and it can be written down here, in a public file.
-CANARY_TOKEN = "zz-pii-canary-do-not-remove"
 # A probe string that is NOT read from any file, used to prove the matcher itself executes.
 # TWO probes, because _deny_hit has two branches and one probe only exercises one of them. A token
 # containing a digit takes the raw-substring path; a purely alphabetic one takes the word-bounded
@@ -488,13 +484,7 @@ class PolicyError(RuntimeError):
 
 
 class Token(object):
-    """A denylist entry, what KIND of thing it is, and (for `derived`) the WITNESS.
-
-    Compares equal to its own string. That is not sugar: this value used to be a bare string
-    everywhere, and several callers legitimately only care about the text. Keeping `token ==
-    "foo"` true means adding the kind does not silently change the meaning of code that was
-    already correct.
-    """
+    """A denylist entry, what KIND of thing it is, and (for `derived`) the WITNESS."""
     __slots__ = ("value", "kind", "source", "witness")
 
     def __init__(self, value, kind=DEFAULT_KIND, source="denylist", witness=None):
@@ -505,18 +495,6 @@ class Token(object):
         # cannot exhibit its own derivation is an assertion, and this whole layer stops being
         # auditable the moment `derived` means "the code said so".
         self.witness = witness
-
-    def __eq__(self, other):
-        return self.value == (other.value if isinstance(other, Token) else other)
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
-
-    def __hash__(self):
-        return hash(self.value)
-
-    def __str__(self):
-        return self.value
 
     def __repr__(self):
         return "Token(%r, %r)" % (self.value, self.kind)
@@ -575,12 +553,6 @@ class Policy(object):
         self._pf = []
         self.notes = []            # loader-level messages that must reach the operator
         self.denylist_present = False
-        self.visibility_present = False
-
-    def __bool__(self):
-        return bool(self.tokens)
-
-    __nonzero__ = __bool__         # py2-style guard; harmless and keeps the intent obvious
 
     def prefilter(self):
         """One combined pattern per matching MODE, used only to decide whether to bother.
@@ -746,7 +718,9 @@ def _parse_denylist(path):
     if type(declared_count) is not int:
         raise PolicyError("%s: format %d requires an integer `count` to attest completeness"
                           % (path, POLICY_FORMAT_SUPPORTED))
-    canary = data.get("canary") or CANARY_TOKEN
+    canary = data.get("canary")
+    if not isinstance(canary, str) or not canary.strip():
+        raise PolicyError("%s: format %d requires a string `canary`" % (path, POLICY_FORMAT_SUPPORTED))
 
     if not isinstance(raw, list):
         raise PolicyError("%s: `tokens` must be a list, found %s" % (path, type(raw).__name__))
@@ -1115,7 +1089,6 @@ def load_policy(root):
         pol.denylist_present = True
         pol.tokens.extend(_parse_denylist(path))
     cross = load_cross_repo_tokens(root, pol.notes)
-    pol.visibility_present = bool(cross) or _optional_policy_exists(VIS_PATH)
     have = {t.value for t in pol.tokens}
     pol.tokens.extend(t for t in cross if t.value not in have)
     pol.grants = load_grants(root, pol.notes)

@@ -92,9 +92,8 @@ def validate_contract(repo):
                 raise ValueError("transient persistence requires a nonempty transient_reason")
         elif "transient_reason" in row:
             raise ValueError("transient_reason requires transient persistence")
-        for key in ("max_bytes",):
-            if key in row and (type(row[key]) is not int or row[key] <= 0):
-                raise ValueError("artifact max_bytes must be a positive integer")
+        if "max_bytes" in row and (type(row["max_bytes"]) is not int or row["max_bytes"] <= 0):
+            raise ValueError("artifact max_bytes must be a positive integer")
     if "max_bytes" in value and (type(value["max_bytes"]) is not int or value["max_bytes"] <= 0):
         raise ValueError("contract max_bytes must be a positive integer")
     if not isinstance(value.get("protected_paths", []), list):

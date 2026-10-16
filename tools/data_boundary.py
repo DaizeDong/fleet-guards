@@ -74,7 +74,6 @@ Stdlib only.
 """
 import argparse
 import fnmatch
-import importlib.util
 import json
 import os
 import ntpath
@@ -84,39 +83,11 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 
-
-# ------------------------------------------------- spawning processes (identical in every kit file)
-# Every spawn goes through _no_window(): a console child of a console-less process (pythonw, a
-# scheduled task) otherwise opens a visible window. The flag is added only when this process has no
-# console, so a hook's unredirected output is never hidden. Each file carries its own copy because
-# the hook runs these files by path and the package imports them individually.
-def _console_less_windows():
-    """True on Windows when this process has no console, so a console child would get a window.
-
-    A hidden console counts as a console: children of a CREATE_NO_WINDOW child share it unseen.
-    If the console cannot be queried the answer is True, the side on which no window can open.
-    """
-    import sys
-    if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
-        return not ctypes.WinDLL("kernel32").GetConsoleCP()
-    except (ImportError, AttributeError, OSError):
-        return True
+import pii_guard
 
 
-def _no_window(**kwargs):
-    """Return subprocess keywords that can never open a console window.
-
-    Merges into any creationflags the caller passes: subprocess.run(args, **_no_window(cwd=root)).
-    """
-    flags = kwargs.get("creationflags", 0) or 0
-    if flags & 0x00000018:              # DETACHED_PROCESS | CREATE_NEW_CONSOLE
-        raise ValueError("DETACHED_PROCESS and CREATE_NEW_CONSOLE can open console windows")
-    if _console_less_windows():
-        kwargs["creationflags"] = flags | 0x08000000      # CREATE_NO_WINDOW
-    return kwargs
+# pii_guard owns the one copy of the spawn helper and the visibility receipt reader.
+_no_window = pii_guard._no_window
 
 
 MANIFEST = ".dataclass.json"
@@ -651,11 +622,6 @@ def _ssh_config_sources():
     return {"paths": sorted(paths), "chains": [(name, selected_system) for name in sorted(user_paths)]}
 
 
-def _ssh_config_paths():
-    sources = _ssh_config_sources()
-    return sources["paths"] if sources is not None else None
-
-
 def _ssh_configuration_problem(host):
     """Prove a literal SSH host under a deliberately small static OpenSSH policy.
 
@@ -672,12 +638,9 @@ def _ssh_configuration_problem(host):
     if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", host):
         return "SSH hostname is outside the static policy"
     host = host.casefold()
-    if host == "github.com":
-        paths, chains = _ssh_config_paths(), None
-    else:
-        sources = _ssh_config_sources()
-        paths = sources["paths"] if sources is not None else None
-        chains = sources["chains"] if sources is not None else None
+    sources = _ssh_config_sources()
+    paths = sources["paths"] if sources is not None else None
+    chains = None if host == "github.com" else (sources["chains"] if sources is not None else None)
     if paths is None:
         return "SSH client or default configuration locations are unproven"
     if host != "github.com" and (not chains or any(
@@ -864,24 +827,11 @@ def prove_private_companion(destination):
 
 
 def recheck_private_proof(proof):
-    """Re-run the ignore query for the worktree root under the proof's bound Git context.
-
-    Fails when the companion's Git configuration changed since the proof was taken.
-    """
+    """Fail when the companion's Git configuration changed since the proof."""
     if not isinstance(proof, PrivateCompanionProof):
         raise GitError("A current PRIVATE companion proof is required")
     if _private_signature(proof._context, _private_configurations(proof._context)) != proof.signature:
         raise GitError("Companion configuration changed after PRIVATE proof")
-    try:
-        result = subprocess.run(["git", "check-ignore", "--no-index", "-q", "--", "."], cwd=proof.root,
-                                env=proof._context[2], capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", **_no_window())
-    except (OSError, ValueError) as error:
-        raise GitError("Read-only companion Git query could not run") from error
-    if result.returncode not in (0, 1):
-        raise GitError("Read-only companion Git query failed with status %d" % result.returncode)
-    if _private_signature(proof._context, _private_configurations(proof._context)) != proof.signature:
-        raise GitError("Companion configuration changed during read-only query")
 
 
 _HTTPS_PERFORMANCE_KEYS = {
@@ -1068,18 +1018,14 @@ def _companion_visibility_once(root, env):
     pushInsteadOf through get-url. Explicit remote selectors must name an attested remote.
     SSH aliases require a static proof of their literal host before receipts authorize DATA.
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pii_guard.py")
     try:
-        spec = importlib.util.spec_from_file_location("_boundary_visibility", path)
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        visibility = guard._load_visibility()
+        visibility = pii_guard._load_visibility()
     except (OSError, ValueError, RuntimeError, ImportError, AttributeError):
         return [], ["companion visibility receipt could not be verified"]
     if visibility is None:
         return [], ["companion has no visibility receipt; visibility is UNKNOWN"]
     public, private, age = visibility
-    if age is None or not 0 <= age <= guard.VIS_MAX_AGE_S:
+    if age is None or not 0 <= age <= pii_guard.VIS_MAX_AGE_S:
         return [], ["companion visibility receipt is undated, stale or future-dated; visibility is UNKNOWN"]
     remotes = _run(["git", "remote"], root, env=env).splitlines()
     if not remotes:
@@ -1153,9 +1099,7 @@ def check_run_shape_probes(root, m, out):
 
     `_run_shape_probes` is: a list of SCHEMATIC filenames naming what this skill's real runs produce.
     Every probe must match some RUN_SHAPE, so a probe that misses is a coverage gap reported by
-    name. An EMPTY list is reported as NOT CALIBRATED, which is a third state next to clean and
-    violation, because "this list was held against this repo and fits" and "nobody has ever looked"
-    are different facts and printed the same green until now.
+    name.
 
     PROBES ARE SCHEMATIC AND THAT RULE IS LOAD BEARING. A probe carrying a real ticker, a real
     mailbox handle, a real channel id or a real counterparty name is private data in a public repo
@@ -1170,7 +1114,7 @@ def check_run_shape_probes(root, m, out):
     """
     probes = m.get("_run_shape_probes")
     if probes is None or not [p for p in probes if str(p).strip()]:
-        return "uncalibrated"
+        return
     missed = []
     for p in probes:
         rel = str(p).strip().replace(chr(92), "/")
@@ -1185,8 +1129,6 @@ def check_run_shape_probes(root, m, out):
                     "against this repo's output, or the shape list has drifted away from it: "
                     + ", ".join(missed[:6]) + ("" if len(missed) <= 6 else
                                                " (+%d more)" % (len(missed) - 6))))
-        return "miss"
-    return "calibrated"
 
 
 def check_empty_data_is_audited(root, m, out):
@@ -1291,10 +1233,6 @@ def main(private_proof=None):
                          "repository and needs no manifest. This is how you hold the list against "
                          "the filenames a real run produced, which is the only way to learn that "
                          "it recognises none of them.")
-    ap.add_argument("--calibration", action="store_true",
-                    help="also say whether this repo's run-shape probe list has ever been filled. "
-                         "Off by default: it never blocks, so printing it every run turns it into "
-                         "background noise rather than information.")
     a = ap.parse_args()
 
     if a.explain:
@@ -1348,15 +1286,13 @@ def main(private_proof=None):
     check_data_has_schema(root, m, out)
     check_fixtures_are_generated(root, m, out)
     check_no_undeclared_run_shapes(root, m, all_paths, out)
-    calib = None
     if not manifest_absent:
         # Check 5 asks whether an EMPTY data list was a finding. With no manifest at all there is
         # no list to have been a finding, and reporting UNAUDITED against a file that does not
         # exist would tell the reader to edit a note when what is missing is the whole manifest.
         check_empty_data_is_audited(root, m, out)
-        # Check 6: a probe that misses is a violation; an EMPTY probe list is only reported, with
-        # --calibration.
-        calib = check_run_shape_probes(root, m, out)
+        # Check 6: a probe that misses is a violation.
+        check_run_shape_probes(root, m, out)
 
     if not out and manifest_absent:
         print("data_boundary: NOT ARMED. There is no %s in %s, so checks 1, 2, 3 and 5 asserted\n"
@@ -1366,14 +1302,6 @@ def main(private_proof=None):
               "  Declare the repo's classes in %s to arm the rest."
               % (MANIFEST, root, len(all_paths), MANIFEST), file=sys.stderr)
         return 3
-
-    if calib == "uncalibrated" and a.calibration:
-        # Only on request: an unconditional notice that never blocks becomes background noise.
-        print("data_boundary: NOT CALIBRATED for this repo. The probe list in %s is empty,\n"
-              "  so check 4 asserted only that no tracked or physical file matches a list nobody has\n"
-              "  held against this skill's own output. Build it by running a real run's\n"
-              "  filenames through --explain and committing the SCHEMATIC forms." % MANIFEST,
-              file=sys.stderr)
 
     if not out:
         if private_proof is not None:

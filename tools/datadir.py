@@ -50,8 +50,8 @@ The tempting next step is to have this function refuse a data dir that sits in a
 cannot do that honestly. This file is loaded by every consumer through fleet_guards.runtime, is
 stdlib-only by contract, and must work on a fresh machine: no ~/.pii-guard/visibility.json,
 no `gh`, possibly no network. Fail-closed there bricks every fresh clone on a question that has no
-local answer; fail-open makes the assertion decorative precisely where it matters. So the visibility
-predicate stays OUT OF BAND, in the fleet checker that does have the map.
+local answer; fail-open makes the assertion decorative precisely where it matters. So visibility is
+enforced at commit time by the consumer's .githooks (publication_guard), not here.
 
 What this file CAN assert with no map, no network and no git binary is strictly weaker and always
 true: a skill's data dir is never inside the skill's OWN repo. Public or private, the tool repo and

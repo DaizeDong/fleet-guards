@@ -4,8 +4,6 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import subprocess
-import shutil
-import stat
 import sys
 
 # Consumers also load this file by path (importlib), where tools/ is not on sys.path.
@@ -13,41 +11,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import data_boundary as boundary  # noqa: E402
 
 
-def unaliased_absolute(path):
-    """Inspect path topology without reading executable or helper contents."""
-    candidate = Path(path)
-    if not candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    try:
-        for node in [*reversed(candidate.parents), candidate]:
-            info = node.lstat()
-            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                return False
-    except OSError:
-        return False
-    return True
-
-
 @contextmanager
-def native_hook_environment(phase):
-    """Git injects its default helper path into hooks; arbitrary overrides remain unproved."""
+def native_hook_environment():
+    """Drop Git's own injected helper path for children; any other override stays and is refused."""
     selected = {key: value for key, value in os.environ.items() if key.upper() == "GIT_EXEC_PATH"}
-    removed = False
-    if phase in {"pre-commit", "pre-push"} and len(selected) == 1:
-        environment = {key: value for key, value in os.environ.items() if key.upper() != "GIT_EXEC_PATH"}
-        git = shutil.which("git")
-        if (git and unaliased_absolute(git) and Path(git).is_file()
-                and Path(git).name.casefold() == ("git.exe" if os.name == "nt" else "git")):
-            result = subprocess.run([git, "--exec-path"], env=environment, capture_output=True,
-                                    text=True, encoding="utf-8", **boundary._no_window())
-            default = result.stdout.strip()
-            actual = next(iter(selected.values()))
-            if (result.returncode == 0 and unaliased_absolute(default) and unaliased_absolute(actual)
-                    and Path(default).is_dir()
-                    and os.path.normcase(os.path.normpath(default)) == os.path.normcase(os.path.normpath(actual))):
-                for key in selected:
-                    del os.environ[key]
-                removed = True
+    removed = bool(selected) and boundary._git_exec_path_problem(dict(os.environ)) is None
+    if removed:
+        for key in selected:
+            del os.environ[key]
     try:
         yield
     finally:
@@ -93,9 +64,7 @@ def main():
     if not path.is_file() or not path.stat().st_size:
         print("BLOCKED: %s is missing or empty; publication policy is unchecked." % path)
         return 1
-    with native_hook_environment(arguments.phase):
-        proof = private_proof(os.path.abspath(arguments.repo),
-                              arguments.phase, arguments.push_destination)
+    proof = private_proof(os.path.abspath(arguments.repo), arguments.phase, arguments.push_destination)
     if proof is not None:
         print("publication_guard: PRIVATE verified: " + ", ".join(proof.repositories))
         print("publication_guard: public-content PII scan is out of scope; structural checks remain required.")
