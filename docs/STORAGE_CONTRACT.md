@@ -54,8 +54,10 @@ that grants an ignored-path exception.
 
 There is no runtime write admission. A writer resolves its companion with the
 shared resolver, keeps its outputs to its declared artifacts inside that companion
-and never writes inside the public source tree. PRIVATE publication of the
-companion is enforced at commit time by the hooks, not by a runtime proof.
+and never writes inside the public source tree. Companions are not wired to
+fleet-guards and nothing checks their visibility; `data_boundary` keeps DATA out
+of public trees, and `publication_guard` calls `prove_private_companion` only on
+the opted-in repository being committed to, to select structural-only scope.
 
 The reusable validation/matching primitives retain Smith's existing names:
 `CONTRACT`, `FIELDS`, `CLASSES`, `SEPARATE`, `COMBINED`, `relative_path`,

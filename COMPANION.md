@@ -23,7 +23,7 @@ Every source path has one class in `.dataclass.json`:
 
 `tools/datadir.py`, reached through `fleet_guards.runtime.companion_resolver(source_root=...)`,
 probes these locations in order and takes the FIRST ONE THAT EXISTS as a
-directory. Discovery proves the companion identity described below; PRIVATE publication is enforced at commit time, not at discovery or write time. `<SKILL>` is this repository's name uppercased with hyphens turned into underscores, so
+directory. Discovery proves the companion identity described below. Companions are not wired to fleet-guards and nothing checks their visibility; `data_boundary` keeps DATA out of public trees. `<SKILL>` is this repository's name uppercased with hyphens turned into underscores, so
 `small-cap-deepdive` becomes `SMALL_CAP_DEEPDIVE`.
 
 | Order | Location | Notes |
@@ -105,11 +105,15 @@ rather than part of this contract. Do not add them to satisfy a checker; nothing
 
 ## Verifying a companion
 
-A companion is verified when it commits or pushes: its own `.githooks/` shims run
-`publication_guard.py`, which calls `prove_private_companion` against the visibility receipt
-`~/.pii-guard/visibility.json`.
+Companions are not wired to fleet-guards: they carry no `.githooks/` shims and nothing checks
+their visibility. Keeping a companion PRIVATE is the owner's job. What the kit enforces is the other
+side: `data_boundary` keeps DATA out of public trees. `publication_guard.py` calls
+`prove_private_companion` only on the opted-in repository being committed to or pushed from, and only
+to select structural-only scope; it never looks at a companion.
 
-The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed` timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL rewrites and additional push URLs are checked. The guard prints the verified repository names and allows versioned DATA there. SSH aliases require an explicit `HostName github.com` in every plausible configuration chain. Missing or stale evidence, public destinations, unrecognized clients, and unproved routing or trust settings block admission. See [the transport contract](COMPANION.md#verifying-a-companion) for the supported SSH and HTTPS configurations. This check uses the local receipt and does not make network calls.
+The proof below reads the visibility receipt `~/.pii-guard/visibility.json`.
+
+The receipt uses the same `owner/repository` to `PUBLIC`/`PRIVATE`/`UNKNOWN` mapping and `_refreshed` timestamp as `pii_guard`. Its age must be known and no more than 30 days. Every effective fetch and push URL across all configured remotes must resolve to a repository marked `PRIVATE`; Git URL rewrites and additional push URLs are checked. The guard prints the verified repository names and applies structural-only scope there. SSH aliases require an explicit `HostName github.com` in every plausible configuration chain. Missing or stale evidence, public destinations, unrecognized clients, and unproved routing or trust settings block admission. See [the transport contract](COMPANION.md#verifying-a-companion) for the supported SSH and HTTPS configurations. This check uses the local receipt and does not make network calls.
 
 Companion discovery starts at the physical DATA destination, independently of the invoking hook's
 repository and index. Its stored repository configuration and its effective process configuration
@@ -139,10 +143,10 @@ Certificate, TLS-backend, Git-helper and HTTP request environment overrides prod
 ### Proof API
 
 `prove_private_companion(destination)` in `tools/data_boundary.py` is the
-proof the commit-time publication guard uses. It returns an immutable proof
+proof `publication_guard` runs on the opted-in repository being committed to or pushed from. It returns an immutable proof
 with `root`, sorted `repositories`, and an opaque `signature` binding the canonical repository
 administration and physical/effective Git configuration snapshots. It is not a write-time API:
-consumers do not call it before writing DATA. PRIVATE publication is enforced by the hooks.
+consumers do not call it before writing DATA, and nothing calls it on a companion.
 
 Git's default injected `GIT_EXEC_PATH` is normalized
 only by the normal hook entrypoint after resolving the same Git executable and checking its default;

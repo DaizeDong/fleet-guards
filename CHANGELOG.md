@@ -72,36 +72,20 @@ All notable changes to this project are documented here (Keep a Changelog style)
   subtraction for rewritten histories, is gone. It was advisory by design and
   passed whenever its backend was missing or unsure. `publication_guard.py`
   therefore no longer returns status 10 for a verified PRIVATE pre-push, since
-  that status existed only to skip the semantic layer; a pass is 0 again. The
-  structural pre-push scan, identity assertion and CI are unchanged.
+  that status existed only to skip the semantic layer; a pass is 0 again.
 - **No `hooks/commit-msg` forwarder.** The optional `.githooks/commit-msg` shim,
   its README and AUTOMATIC_SYNC instructions, its test and the
   `write_commit_message_rule` fixture are removed. It forwarded a personal
-  prose rule, not a security property. The missing-guard messages in both hooks
-  now point at `git submodule update --init --recursive` instead of the retired
-  installer.
+  prose rule, not a security property.
 - **No runtime PRIVATE proof for consumers.** `fleet_guards.runtime` no longer
   exports `prove_private_companion` or `authorize_artifact_write`, and
   `tools/storage_contract.py` no longer has `authorize_artifact_write` or
   `ArtifactWriteAdmission`. COMPANION.md no longer tells consumers to prove
   before writing. Proving on every write cost dozens of git/gh subprocesses per
-  call. PRIVATE publication stays enforced at commit time: `publication_guard`
-  and the companion audit still use `data_boundary.prove_private_companion`, and
-  the hooks and CI are unchanged.
-
-### Added
-
-- **Live repository visibility no longer depends on the active gh account.**
-  `query_github_visibility(OWNER/NAME)` in `tools/data_boundary.py` (and
-  `fleet_guards.runtime`) asks with the owner's stored gh account first, then
-  every other stored account, then gh's default credential, borrowing each
-  token for one child process through `GH_TOKEN`. It never switches or reads
-  the active account, never prints a token, accepts only an answer that names
-  the requested repository, and raises `GitError` when no credential can see
-  it. A consumer that confirmed a receipt with a plain `gh repo view` failed
-  closed whenever another session switched the active account to one without
-  access. A synthetic `gh` from `tools/make_fixtures.py` covers the incident,
-  the fallbacks and the refusal.
+  call. Companions are not wired to fleet-guards and nothing checks their
+  visibility; `publication_guard` still calls
+  `data_boundary.prove_private_companion` on the opted-in repository being
+  committed to, only to select structural-only scope.
 
 ### Changed
 

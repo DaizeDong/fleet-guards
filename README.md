@@ -111,7 +111,7 @@ Both call `python` directly; a missing or broken interpreter returns nonzero and
 
 The [publication policy](docs/PUBLICATION_POLICY.md) decides scope. Current evidence must prove every stored and effective fetch/push destination PRIVATE before private content is admitted. Missing evidence retains full public checks. Manifest, schema, fixture, path and identity requirements still apply to PRIVATE repositories.
 
-Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always use public policy. For companion admission, including receipt freshness and supported transports, follow [COMPANION.md](COMPANION.md#verifying-a-companion).
+Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always use public policy. Companions are not wired to fleet-guards and nothing checks their visibility; `data_boundary` keeps DATA out of public trees. `publication_guard.py` calls `prove_private_companion` only on the opted-in repository being committed to, to select structural-only scope; receipt freshness and supported transports are in [COMPANION.md](COMPANION.md#verifying-a-companion).
 
 ## What is in here
 

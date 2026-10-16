@@ -25,8 +25,9 @@ data = resolver.resolve_data_dir("example-tool")
 The bound root controls sibling discovery and own-source exclusion. It must be absolute, and each
 resolver retains its own immutable binding. Every resolver entry point requires `source_root`;
 nothing is inferred from where the kit is installed. Discovery identifies a location; it does not
-establish artifact ownership. There is no runtime PRIVATE proof or write admission: PRIVATE
-publication is enforced at commit time by the hooks.
+establish artifact ownership. There is no runtime PRIVATE proof or write admission. Companions are
+not wired to fleet-guards and nothing checks their visibility; `data_boundary` keeps DATA out of
+public trees.
 
 ## Storage contracts
 
@@ -90,4 +91,4 @@ portable promise of directory-entry survival across Windows power loss.
 These primitives operate in trusted, cooperative directories. They do not isolate
 ancestor paths from a hostile concurrent process, implement atomic compare-and-swap,
 or prove PRIVATE repository visibility. Consumers resolve their companion before
-writing; PRIVATE publication is enforced at commit time.
+writing; nothing checks a companion's visibility.
