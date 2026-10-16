@@ -14,7 +14,8 @@ point at the public repo in the first place.
 
   resolve_data_dir("small-cap-deepdive")  ->  the private directory, or None
 
-Discovery order (first existing wins):
+Discovery order (first existing wins; a set environment variable that names a missing directory
+raises DataDirResolutionError instead of falling through to the next step):
   1. $<SKILL>_DATA_DIR                       explicit override / hot-swap
   2. $<SKILL>_CONFIG                         the PRIVATE COMPANION REPO, wherever it is pinned:
                                              <config>/data/ when that exists, else <config> itself
@@ -290,17 +291,24 @@ def _candidates(skill, *, source_root):
     variable they set. That is taken on trust: someone who types a path has already supplied the intent that the proof below stands in
     for, and demanding a marker there would break every deliberate override for no safety gain.
     The CONVENTION path is different in kind and that is why it alone is checked. This module
-    DERIVES it -- the sibling of whatever worktree the file happens to sit in -- so an
+    DERIVES it -- the `<skill>-config` sibling of the consumer's source_root -- so an
     unrelated directory can come to occupy it, which is exactly what happened on 2026-09-02.
-    A guess has to be proven; a path someone typed does not.
+    A guess has to be proven; a path someone typed does not. By the same token a typed path that
+    does not exist raises: falling through to the convention would hand back a directory the
+    operator did not select.
     """
     out = []
     d = os.environ.get(_env_var(skill))
     if d:
-        out.append((Path(os.path.expanduser(d)), True))
+        p = Path(os.path.expanduser(d))
+        if not p.is_dir():
+            raise DataDirResolutionError("%s names a missing directory: %s" % (_env_var(skill), p))
+        out.append((p, True))
     c = os.environ.get(_config_env_var(skill))
     if c:
         root = Path(os.path.expanduser(c))
+        if not root.is_dir():
+            raise DataDirResolutionError("%s names a missing directory: %s" % (_config_env_var(skill), root))
         # A companion repo that keeps its output under data/ gets data/; one that files it directly
         # at the repo root (daily-hotspots' archive/ is the fleet's other shape) gets the root.
         out.append((root / "data", True))

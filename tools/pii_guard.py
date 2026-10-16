@@ -914,10 +914,9 @@ def _map_age_s(vis, path, notes):
 def derivation_witness(owner, name, public_by_owner):
     """The PUBLIC parent `name` is mechanically reconstructible from, or None.
 
-    The convention that makes this work is not folklore: every public skill repo in this fleet
-    ships a `tools/datadir.py` whose module docstring spells out `<skill>-config` as where the
-    private companion lives. So the mapping from a public name to its private companion is
-    already published, by us, in the repos being scanned. A token anyone can reconstruct from
+    The convention that makes this work is not folklore: the `<skill>-config` convention is
+    published in fleet-guards' tools/datadir.py and in each public consumer's docs, so the mapping
+    from a public name to its private companion is already public, published by us. A token anyone can reconstruct from
     published material carries no marginal information, and enforcing it costs history rewrites
     in exchange for nothing.
 
