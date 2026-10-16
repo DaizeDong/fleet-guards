@@ -283,16 +283,12 @@ def _kernel():
 
 
 @contextmanager
-def _file_handle(path, *, directory=False, read_only=False, delete=False):
+def _file_handle(path, *, directory=False):
     import ctypes
     kernel = _kernel()
     # Directory handles deny rename/delete of every ancestor. File handles
     # deny both write and delete sharing; rename uses this same handle.
     access, sharing = (0x80, 3) if directory else (0x80000000 | 0x10000, 1)
-    if read_only:
-        access &= ~0x10000
-    if delete:
-        access |= 0x10000
     handle = kernel.CreateFileW(str(Path(path).absolute()), access, sharing, None, 3,
                                 0x00200000 | (0x02000000 if directory else 0), None)
     if handle == ctypes.c_void_p(-1).value:

@@ -23,7 +23,7 @@
     "",
     "_run_shape_probes stays empty for the same reason and is the one honest answer here: a probe",
     "list names what a real run of THIS repo writes, and a real run of this repo writes nothing.",
-    "2026-10-05. The shared Python filesystem API writes only to explicit caller-supplied paths; it owns no runtime store or default output path. Credential scans return metadata to the caller or stdout. Package builds contain TOOL code only. No real-run DATA destination is introduced in this repository. Consumers retain responsibility for proving PRIVATE storage and publication authority.",
+    "2026-10-05. The shared Python filesystem API writes only to explicit caller-supplied paths; it owns no runtime store or default output path. Credential scans return metadata to the caller or stdout. Package builds contain TOOL code only. No real-run DATA destination is introduced in this repository. PRIVATE publication is enforced at commit time by the consumers' .githooks shims.",
     "2026-10-15. tools/fleet_sync.py, the CI action and every GitHub workflow were deleted; the kit runs only from the local checkout named by git config fleet.guards and writes no new location."
   ]
 }

@@ -42,7 +42,7 @@ _SHAPES = tuple((name, re.compile(pattern, re.I)) for name, pattern in (
 _KEY = r"(?:password|passwd|pwd|api[_-]?key|secret|access[_-]?(?:key|token)|refresh[_-]?token|client[_-]?secret|private[_-]?key|token|webhook)"
 _VALUE = r'''(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;`]+)'''
 # Plain-text/YAML values can contain commas and semicolons. CLI/JSON argument
-# delimiters must not truncate those values before the legacy length check.
+# delimiters must not truncate those values before the minimum length check.
 _ASSIGNMENT_VALUE = r'''(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s`]+)'''
 _ASSIGNMENT = re.compile(r"\b" + _KEY + r"\b[\"']?\s*[:=]\s*" + _ASSIGNMENT_VALUE, re.I)
 _CLI = re.compile(r"--" + _KEY + r"\b(?:=|\s+|[\"']\s*,\s*)" + _VALUE, re.I)

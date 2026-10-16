@@ -1,46 +1,17 @@
 """Consumer access to the canonical companion resolver and storage contract.
 
-The modules are the checkout's tools/, packaged as fleet_guards._tools: an editable install
-(pip install -e "$(git config --get fleet.guards)") maps it to the checkout, and a built wheel
-carries a copy. PRIVATE publication is enforced at commit time by the consumer's .githooks shims,
-not by a runtime proof.
+The modules come from fleet_guards._tools, which is the checkout's tools/ directory: an editable
+install (pip install -e "$(git config --get fleet.guards)") maps it to the checkout, and a built
+wheel carries a copy. PRIVATE publication is enforced at commit time by the consumer's .githooks
+shims, not by a runtime proof.
 """
 from dataclasses import dataclass
-import importlib.util
+import importlib
 from pathlib import Path
-import sys
-import threading
-
-_LOAD_LOCK = threading.RLock()
 
 
 def _canonical(name):
-    with _LOAD_LOCK:
-        return _load_canonical(name)
-
-
-def _load_canonical(name):
-    spec = importlib.util.find_spec("fleet_guards._tools")
-    locations = list(spec.submodule_search_locations or []) if spec else []
-    path = Path(locations[0]) / (name + ".py") if locations else None
-    if path is None or not path.is_file():
-        raise ImportError(
-            "fleet_guards cannot find _tools/%s.py; reinstall it from the checkout: "
-            'pip install -e "$(git config --get fleet.guards)"' % name)
-    path = path.resolve()
-    key = "_fleet_guards_canonical_" + name
-    previous = sys.modules.get(key)
-    if previous is not None and Path(previous.__file__).resolve() == path:
-        return previous
-    spec = importlib.util.spec_from_file_location(key, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[key] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        sys.modules.pop(key, None)
-        raise
-    return module
+    return importlib.import_module("fleet_guards._tools." + name)
 
 
 @dataclass(frozen=True)
@@ -53,9 +24,8 @@ class CompanionResolver:
             raise ValueError("source_root must be absolute")
         object.__setattr__(self, "source_root", path.resolve())
 
-    def resolve_data_dir(self, skill, create=False):
-        return _canonical("datadir").resolve_data_dir(
-            skill, create=create, source_root=self.source_root)
+    def resolve_data_dir(self, skill):
+        return _canonical("datadir").resolve_data_dir(skill, source_root=self.source_root)
 
     def resolve_companion_root(self, skill):
         return _canonical("datadir").resolve_companion_root(skill, source_root=self.source_root)
@@ -64,9 +34,9 @@ class CompanionResolver:
         return _canonical("datadir").assert_outside_own_repo(
             path, skill, source_root=self.source_root)
 
-    def data_path(self, skill, relative_path, create=False):
+    def data_path(self, skill, relative_path):
         return _canonical("datadir").data_path(
-            skill, relative_path, create=create, source_root=self.source_root)
+            skill, relative_path, source_root=self.source_root)
 
 
 def companion_resolver(*, source_root):

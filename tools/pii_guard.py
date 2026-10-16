@@ -892,8 +892,7 @@ def _load_visibility(notes=None):
     for key, v in vis.items():
         if not isinstance(key, str) or "/" not in key:
             continue                       # `_refreshed`, `_verified` and friends
-        state = (v.get("v") if isinstance(v, dict) else v)
-        state = str(state).upper()
+        state = v.upper() if isinstance(v, str) else "UNKNOWN"
         owner, _, name = key.rpartition("/")
         owner, name = owner.strip().lower(), name.strip().lower()
         if state == "PUBLIC":
@@ -1102,7 +1101,7 @@ def load_grants(root, notes):
     return grants
 
 
-def load_policy(root=None):
+def load_policy(root):
     """Assemble the whole second layer, and prove it is worth trusting before returning it.
 
     Order matters. The matcher probe runs FIRST, because a broken matcher would make every
@@ -1115,12 +1114,11 @@ def load_policy(root=None):
     if path and _optional_policy_exists(path):
         pol.denylist_present = True
         pol.tokens.extend(_parse_denylist(path))
-    if root:
-        cross = load_cross_repo_tokens(root, pol.notes)
-        pol.visibility_present = bool(cross) or _optional_policy_exists(VIS_PATH)
-        have = {t.value for t in pol.tokens}
-        pol.tokens.extend(t for t in cross if t.value not in have)
-        pol.grants = load_grants(root, pol.notes)
+    cross = load_cross_repo_tokens(root, pol.notes)
+    pol.visibility_present = bool(cross) or _optional_policy_exists(VIS_PATH)
+    have = {t.value for t in pol.tokens}
+    pol.tokens.extend(t for t in cross if t.value not in have)
+    pol.grants = load_grants(root, pol.notes)
     return pol
 
 
@@ -1422,7 +1420,7 @@ def _looks_like_text(text):
     return good >= len(sample) * 0.85
 
 
-def scan_tree(root, allow, pol, files=None, stats=None):
+def scan_tree(root, allow, pol, stats=None):
     """Scan the tracked working tree.
 
     `stats` (optional dict) is filled with what was and was not examined. A skipped file is not a
@@ -1433,9 +1431,8 @@ def scan_tree(root, allow, pol, files=None, stats=None):
     out = []
     counts = {"enumerated": 0, "scanned": 0, "skipped_dir": 0, "skipped_binary_ext": 0,
               "unreadable": [], "recoded": []}
-    # An explicit file list is scanned as supplied; arbitrary filesystem markers cannot hide it.
-    submodules = _submodule_paths(root) if files is None else set()
-    for rel in (tracked_files(root) if files is None else files):
+    submodules = _submodule_paths(root)
+    for rel in tracked_files(root):
         # NOT rel.strip(). `tracked_files` uses `git ls-files -z`, whose separator is unambiguous,
         # and its own docstring says so -- but this loop kept trimming anyway, which is the same
         # inconsistency wearing a different hat. A tracked path with a leading or trailing space
@@ -1743,36 +1740,6 @@ def _added_line_indices(before, after):
             if tag in ("insert", "replace") for i in range(start, end)}
 
 
-def _scan_changed_files(root, files, parents, allow, pol, out, where, domain):
-    """Scan new path names and lines new relative to every parent at that path."""
-    cache = {}
-    for path, entry in files.items():
-        if any(parent.get(path) == entry for parent in parents):
-            continue
-        if domain == "staged" or all(path not in parent for parent in parents):
-            scan_text(path, "%s %s (path)" % (where, path), allow, pol, out,
-                      domain=domain, path_text=True)
-        kind, oid = entry
-        if kind != "blob":
-            continue
-        for content in _blob_texts(root, oid, cache):
-            lines = content.splitlines()
-            added = set(range(len(lines)))
-            for parent in parents:
-                previous = parent.get(path)
-                old_texts = (_blob_texts(root, previous[1], cache)
-                             if previous and previous[0] == "blob" else ())
-                # A line already present under any plausible old decoding is not newly added.
-                for old_text in old_texts or ("",):
-                    added.intersection_update(_added_line_indices(old_text.splitlines(), lines))
-                if not added:
-                    break
-            deny_only = is_scanner_path(path) or is_scanner_content(path, content)
-            for index in sorted(added):
-                scan_text(lines[index], where + " " + path, allow, pol, out,
-                          domain=domain, deny_only=deny_only)
-
-
 def scan_staged(root, allow, pol):
     """Scan only what is staged -- the pre-commit gate.
 
@@ -1798,7 +1765,28 @@ def scan_staged(root, allow, pol):
             if stage == "0" and path in paths:
                 files[path] = ("commit" if mode == "160000" else "blob", oid)
     parent = _commit_files(root, "HEAD") if _has_commits(root) else {}
-    _scan_changed_files(root, files, [parent], allow, pol, out, "<staged>", "staged")
+    cache = {}
+    for path, entry in files.items():
+        previous = parent.get(path)
+        if previous == entry:
+            continue
+        # Path names are always scanned at commit time: a rename into a leaking name is new text.
+        scan_text(path, "<staged> %s (path)" % path, allow, pol, out, domain="staged", path_text=True)
+        kind, oid = entry
+        if kind != "blob":
+            continue
+        old_texts = (_blob_texts(root, previous[1], cache)
+                     if previous and previous[0] == "blob" else ())
+        for content in _blob_texts(root, oid, cache):
+            lines = content.splitlines()
+            added = set(range(len(lines)))
+            # A line already present under any plausible old decoding is not newly added.
+            for old_text in old_texts or ("",):
+                added.intersection_update(_added_line_indices(old_text.splitlines(), lines))
+            deny_only = is_scanner_path(path) or is_scanner_content(path, content)
+            for index in sorted(added):
+                scan_text(lines[index], "<staged> " + path, allow, pol, out,
+                          domain="staged", deny_only=deny_only)
     return out
 
 
@@ -1943,15 +1931,14 @@ def main():
     findings = []
     tree_stats, hist_stats = {}, _blank_history_stats()
     if a.tree:
-        files = tracked_files(root)
-        if not files:
+        findings += scan_tree(root, allow, pol, stats=tree_stats)
+        if not tree_stats["enumerated"]:
             # A real repo can legitimately track zero files (a fresh `git init`), so this is not an
             # error -- but it is unusual, and it is indistinguishable in the OUTPUT from a scan that
             # was prevented. State it instead of printing "clean".
             print("pii_guard: WARNING %s is a git repo but tracks 0 files -- nothing was examined.\n"
                   "  A clean result here means 'there was nothing to scan', not 'the content is "
                   "clean'." % root, file=sys.stderr)
-        findings += scan_tree(root, allow, pol, stats=tree_stats)
     if a.history:
         findings += scan_history(root, allow, pol, stats=hist_stats)
     if a.staged:

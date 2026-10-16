@@ -656,7 +656,7 @@ def _ssh_config_paths():
     return sources["paths"] if sources is not None else None
 
 
-def _ssh_configuration_problem(host="github.com"):
+def _ssh_configuration_problem(host):
     """Prove a literal SSH host under a deliberately small static OpenSSH policy.
 
     Never invoke ssh -G: evaluating Match exec there can execute configuration commands.
@@ -804,9 +804,9 @@ def _companion_git_context(destination):
     return root, physical, effective
 
 
-def _companion_visibility(root, git_context=None):
+def _companion_visibility(git_context):
     """Require both physical and effective destinations to have fresh PRIVATE receipts."""
-    root, physical, effective = git_context or _companion_git_context(root)
+    root, physical, effective = git_context
     proven = set()
     for environment in (physical, effective):
         destinations, errors = _companion_visibility_once(root, environment)
@@ -853,7 +853,7 @@ def prove_private_companion(destination):
 
     context = _companion_git_context(destination)
     before = _private_configurations(context)
-    repositories, errors = _companion_visibility(context[0], context)
+    repositories, errors = _companion_visibility(context)
     if errors:
         raise GitError("PRIVATE companion proof failed: " + "; ".join(errors))
     if before != _private_configurations(context):
@@ -863,42 +863,25 @@ def prove_private_companion(destination):
                                  _private_signature(context, before), frozen_context)
 
 
-def read_private_companion_git(proof, *arguments):
-    """Read HEAD or ignore status under a still-current proof's bound Git context.
+def recheck_private_proof(proof):
+    """Re-run the ignore query for the worktree root under the proof's bound Git context.
 
-    Only rev-parse --verify HEAD and check-ignore --no-index -q -- RELATIVE_PATH
-    are supported. A single trailing / preserves directory-only ignore semantics,
-    including before the directory exists. The latter preserves native status 0/1. Other failures raise
-    GitError without exposing captured environment or configuration values.
+    Fails when the companion's Git configuration changed since the proof was taken.
     """
     if not isinstance(proof, PrivateCompanionProof):
         raise GitError("A current PRIVATE companion proof is required")
-    if arguments == ("rev-parse", "--verify", "HEAD"):
-        accepted = {0}
-    elif len(arguments) == 5 and arguments[:4] == ("check-ignore", "--no-index", "-q", "--"):
-        relative = arguments[4]
-        path = relative[:-1] if isinstance(relative, str) and relative.endswith("/") else relative
-        if (not isinstance(relative, str) or not relative or "\0" in relative
-                or ntpath.splitdrive(relative)[0] or relative.startswith(("/", "\\"))
-                or (relative != "." and any(part in {"", ".", ".."}
-                                            for part in path.replace("\\", "/").split("/")))):
-            raise GitError("The ignore query requires a canonical relative path")
-        accepted = {0, 1}
-    else:
-        raise GitError("Unsupported read-only companion Git query")
     if _private_signature(proof._context, _private_configurations(proof._context)) != proof.signature:
         raise GitError("Companion configuration changed after PRIVATE proof")
     try:
-        result = subprocess.run(["git", *arguments], cwd=proof.root, env=proof._context[2],
-                                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                **_no_window())
+        result = subprocess.run(["git", "check-ignore", "--no-index", "-q", "--", "."], cwd=proof.root,
+                                env=proof._context[2], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", **_no_window())
     except (OSError, ValueError) as error:
         raise GitError("Read-only companion Git query could not run") from error
-    if result.returncode not in accepted:
+    if result.returncode not in (0, 1):
         raise GitError("Read-only companion Git query failed with status %d" % result.returncode)
     if _private_signature(proof._context, _private_configurations(proof._context)) != proof.signature:
         raise GitError("Companion configuration changed during read-only query")
-    return result
 
 
 _HTTPS_PERFORMANCE_KEYS = {
@@ -1209,24 +1192,18 @@ def check_run_shape_probes(root, m, out):
 def check_empty_data_is_audited(root, m, out):
     """An empty `data` list has to be a conclusion someone reached, not a default.
 
-    THIS IS THE CHECK THAT MAKES `_audited` MEAN ANYTHING. The convention of recording an
-    `_audited` (or `_armed`) note next to an empty data list has been followed for a long time:
-    measured 2026-08-20, ten of the eleven manifests with an empty list carried one. And until
-    that date NOTHING READ THEM. `grep -rn "_armed|_audited"` over the guard sources returned
-    zero hits, so the entire evidence that "this skill genuinely produces no in-repo data" was a
-    sentence no program had ever looked at. data_boundary is the primary control, and its own
-    docstring says PROSE IS NOT A CONTROL; this was prose.
+    THIS IS THE CHECK THAT MAKES `_audited` MEAN ANYTHING. Without it the evidence that "this
+    skill genuinely produces no in-repo data" would be a sentence no program ever looks at.
 
     An empty list is the single most consequential value in this file, because every per-file
     check below iterates it. Empty means "assert nothing", and it is also exactly what a fresh
     manifest looks like. Requiring a human-written reason is what separates the two.
 
-    Deliberately NOT satisfied by any non-empty string of whitespace, and deliberately naming
-    both keys: `_armed` is the older spelling and several manifests still use it.
+    Deliberately NOT satisfied by a string of whitespace.
     """
     if m.get("data"):
         return
-    note = m.get("_audited") or m.get("_armed")
+    note = m.get("_audited")
     if note is None or not str(note).strip():
         out.append(("UNAUDITED", MANIFEST,
                     "an empty \"data\" list asserts nothing, and nothing here says that was a "
@@ -1314,8 +1291,6 @@ def main(private_proof=None):
                          "repository and needs no manifest. This is how you hold the list against "
                          "the filenames a real run produced, which is the only way to learn that "
                          "it recognises none of them.")
-    ap.add_argument("--require-hit", action="store_true",
-                    help="with --explain, exit 1 when no supplied name matched any shape")
     ap.add_argument("--calibration", action="store_true",
                     help="also say whether this repo's run-shape probe list has ever been filled. "
                          "Off by default: it never blocks, so printing it every run turns it into "
@@ -1325,9 +1300,9 @@ def main(private_proof=None):
     if a.explain:
         # Deliberately before any repository work: --explain must be usable from anywhere, including
         # against a listing taken from OUTSIDE every public repo, which is where real run output
-        # lives. Without --require-hit it always exits 0, so it can never become a gate by accident.
-        hits = explain(a.explain)
-        return 1 if (a.require_hit and hits == 0) else 0
+        # lives. It always exits 0.
+        explain(a.explain)
+        return 0
 
     try:
         root = _repo_root(os.path.abspath(a.repo))
@@ -1362,7 +1337,6 @@ def main(private_proof=None):
     if private_proof is not None:
         if os.path.normcase(os.path.realpath(root)) != os.path.normcase(os.path.realpath(private_proof.root)):
             raise GitError("Private scope does not identify the scanned worktree")
-        read_private_companion_git(private_proof, "check-ignore", "--no-index", "-q", "--", ".")
     absent = m if private_proof is None else {"data_sealed": m.get("data_sealed", [])}
     check_data_not_tracked(root, absent, files, out)
     try:
@@ -1380,8 +1354,8 @@ def main(private_proof=None):
         # no list to have been a finding, and reporting UNAUDITED against a file that does not
         # exist would tell the reader to edit a note when what is missing is the whole manifest.
         check_empty_data_is_audited(root, m, out)
-        # Check 6, PHASE 1: a probe that misses is a violation now, an EMPTY probe list is reported
-        # and does not block. See check_run_shape_probes for why the flip is per repo and later.
+        # Check 6: a probe that misses is a violation; an EMPTY probe list is only reported, with
+        # --calibration.
         calib = check_run_shape_probes(root, m, out)
 
     if not out and manifest_absent:
@@ -1403,7 +1377,7 @@ def main(private_proof=None):
 
     if not out:
         if private_proof is not None:
-            read_private_companion_git(private_proof, "check-ignore", "--no-index", "-q", "--", ".")
+            recheck_private_proof(private_proof)
             print("data_boundary: PRIVATE structural checks passed (%d declared DATA paths permitted, "
                   "%d FIXTUREs generator-reproducible, %d tracked or physical paths classified)"
                   % (len(m.get("data", [])), len(m.get("fixture", [])), len(all_paths)))

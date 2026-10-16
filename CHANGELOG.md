@@ -14,6 +14,12 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Removed
 
+- Unused options and old shapes: `create` on `resolve_data_dir`/`data_path` (no caller ever
+  passed it), the `assert_outside_own_repo` wrapper (the function now carries that name), the
+  `_armed` manifest key (only `_audited` counts), `data_boundary --require-hit`,
+  `read_private_companion_git` (now `recheck_private_proof`, run once at the end of a PRIVATE
+  scan), the dict-shaped visibility entry, and the custom loader in `fleet_guards.runtime`
+  (a plain import of `fleet_guards._tools` replaces it).
 - Compatibility and unused surface: the `support-egress-v1` credential policy (canary and
   entropy checks) and its `entropy_threshold` keyword; the `python -m fleet_guards` CLI and
   the `fleet-guards` console script; `assert_same_volume`/`CrossVolumeError`; the private

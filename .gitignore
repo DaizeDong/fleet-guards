@@ -1,7 +1,6 @@
 # Bytecode and build artifacts from running the tools and the editable install.
 __pycache__/
 *.pyc
-.pytest_cache/
 build/
 dist/
 *.egg-info/
