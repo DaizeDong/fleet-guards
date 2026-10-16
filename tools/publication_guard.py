@@ -13,7 +13,7 @@ import sys
 # Every spawn goes through _no_window(): a console child of a console-less process (pythonw, a
 # scheduled task) otherwise opens a visible window. The flag is added only when this process has no
 # console, so a hook's unredirected output is never hidden. Each file carries its own copy because
-# consumers load these files one at a time by path.
+# the hook runs these files by path and the package imports them individually.
 def _console_less_windows():
     """True on Windows when this process has no console, so a console child would get a window.
 

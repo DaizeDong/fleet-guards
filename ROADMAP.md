@@ -2,7 +2,7 @@
 
 Current: **v0.1.0**
 
-Shared Python package: **v0.2.1**, including consumer-bound companion discovery
+Shared Python package: **v0.3.0**, including consumer-bound companion discovery
 and the storage contract accessor. See [PACKAGE.md](PACKAGE.md).
 
 ## v0.1.0 (current)

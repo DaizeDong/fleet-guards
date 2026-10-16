@@ -1,1 +1,1 @@
-.claude/scripts/synthetic_fixture.py # Synthetic path produced by tools/make_fixtures.py to test private-path detection; it does not identify an operator file.
+.claude/scripts/synthetic_fixture.py # History only: a synthetic path in old blobs of the since-deleted tools/make_fixtures.py, used to test private-path detection; it does not identify an operator file.

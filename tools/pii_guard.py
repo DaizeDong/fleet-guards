@@ -91,7 +91,7 @@ import sys
 # Every spawn goes through _no_window(): a console child of a console-less process (pythonw, a
 # scheduled task) otherwise opens a visible window. The flag is added only when this process has no
 # console, so a hook's unredirected output is never hidden. Each file carries its own copy because
-# consumers load these files one at a time by path.
+# the hook runs these files by path and the package imports them individually.
 def _console_less_windows():
     """True on Windows when this process has no console, so a console child would get a window.
 
@@ -264,8 +264,8 @@ SCANNER_PATHS = {"tools/pii_guard.py", "tools/test_pii_guard.py", "tools/test_pi
 # The guard's own files carry this marker, and a basename match OUTSIDE the vendored paths is
 # honoured only when the marker is present. That is the difference between exempting a file because
 # of what it IS and exempting it because of what it is CALLED: `git mv secrets.md docs/pii_guard.py`
-# gets nothing, while a legitimate vendored copy at a non-standard path (skill-smith ships one as a
-# template asset) keeps working without anyone maintaining a list of blessed locations.
+# gets nothing, while a legitimate copy at a non-standard path keeps working without anyone
+# maintaining a list of blessed locations.
 SCANNER_MARKER = "pii-guard:scanner-file"
 
 
@@ -1453,12 +1453,6 @@ def _decode_candidates(data):
     except UnicodeDecodeError:
         return (), None
     return ((text,), "cp1252") if _looks_like_text(text) else ((), None)
-
-
-def _decode_best(data):
-    """Compatibility text view; incremental scans compare candidates separately."""
-    texts, encoding = _decode_candidates(data)
-    return ("\n".join(texts), encoding) if texts else (None, None)
 
 
 def _looks_like_text(text):

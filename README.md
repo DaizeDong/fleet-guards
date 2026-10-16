@@ -146,7 +146,7 @@ Every process the kit starts goes through `_no_window()`. A console program star
 with no console of its own (`pythonw`, a scheduled task, a service) otherwise gets a visible window.
 The helper adds `CREATE_NO_WINDOW` only when the calling process has no console, so a hook's
 unredirected output is never hidden, and it refuses `DETACHED_PROCESS` and `CREATE_NEW_CONSOLE`.
-Each tool file carries its own copy, because the tools are loaded one at a time by path.
+Each tool file carries its own copy, because the hook runs the tools by path and the package imports them individually.
 
 ## Limitations
 
