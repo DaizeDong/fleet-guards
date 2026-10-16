@@ -38,11 +38,11 @@ sender address that a parser must recognize). Put those in a repo-local `.pii-al
 line with a `# reason`. That is an allowlist entry with a written justification -- reviewable in the
 diff, unlike a silent regex tweak.
 
-OPTIONAL PRIVATE LAYER (rebuilt 2026-08-20; see THE POLICY LAYER below for the full argument)
-----------------------
-If `~/.pii-denylist.json` exists it is read at runtime for extra literals (the operator's own real
-tokens). It never lives in any repo. Absent -> skipped and SAID OUT LOUD, structural checks still
-run everywhere (contributors, other machines).
+PRIVATE LAYER (rebuilt 2026-08-20; see THE POLICY LAYER below for the full argument)
+-------------
+`~/.pii-denylist.json` (the operator's own real tokens) and `~/.pii-guard/visibility.json` (the
+repo visibility map) are read at runtime. Neither ever lives in any repo. The kit runs only on the
+owner's machine, so both are required: a missing or unreadable file is a PolicyError and exit 2.
 
 That layer used to be a flat list of strings with one punishment, and it had two faults that were
 not bugs but consequences of the shape:
@@ -551,7 +551,6 @@ class Policy(object):
         self._pf_key = None
         self._pf = []
         self.notes = []            # loader-level messages that must reach the operator
-        self.denylist_present = False
 
     def prefilter(self):
         """One combined pattern per matching MODE, used only to decide whether to bother.
@@ -625,17 +624,6 @@ class Policy(object):
                      "written now. That is the failure mode this guard exists for."
                      % (len(collided), sum(g.live_collisions for g in collided)))
         return line
-
-
-def _optional_policy_exists(path):
-    """Only a missing file makes an optional policy layer uninitialized."""
-    try:
-        os.stat(path)
-    except FileNotFoundError:
-        return False
-    except OSError as error:
-        raise PolicyError("cannot inspect %s: %s" % (path, error)) from None
-    return True
 
 
 def _read_json(path):
@@ -739,8 +727,7 @@ def _parse_denylist(path):
         raise PolicyError(
             "%s exists but yields zero tokens.\n"
             "  An empty policy file and a missing one are different situations and this one is\n"
-            "  almost always damage. If you genuinely have no private tokens, delete the file:\n"
-            "  absent is a state the guard reports out loud, empty is one it used to hide."
+            "  almost always damage. The file is required on the owner's machine."
             % path)
 
     if not any(t.value == canary.lower() for t in toks):
@@ -763,14 +750,10 @@ def _parse_denylist(path):
     # statement about the file. The canary is dropped only after both assertions have run.
     if not toks_after_canary:
         # Zero enforceable tokens, whether the file was empty to begin with or held only its
-        # canary. Either way `denylist_present` goes True, so the "layer absent" note does not
-        # print, and the layer is gone in complete silence. Measured 2026-08-20.
-        #
+        # canary: the layer would load while enforcing nothing. Measured 2026-08-20.
         raise PolicyError(
-            "%s yields zero enforceable tokens, so the private layer would load and report itself\n"
-            "  as PRESENT while enforcing nothing. Either the file is empty, or it holds only its\n"
-            "  canary. If you meant to empty it, delete it instead: absent is a state this guard\n"
-            "  announces out loud, and empty is one it used to hide."
+            "%s yields zero enforceable tokens, so the private layer would load while enforcing\n"
+            "  nothing. Either the file is empty, or it holds only its canary."
             % path)
     return toks_after_canary
 
@@ -831,24 +814,14 @@ VIS_PATH = os.path.expanduser("~/.pii-guard/visibility.json")
 
 
 def _load_visibility(notes=None):
-    """(public_names_by_owner, private_keys) from the visibility cache, or None if absent.
+    """(public_names_by_owner, private_keys, age_s) from the visibility cache.
 
-    Returning None for "absent" and RAISING for "present but unreadable" is the whole point.
-    Absent is ordinary: a contributor's clone has no cache, another machine has no cache, and the layer is
-    documented as operator-only. Unreadable is damage, and the old code answered damage with
-    an empty map -- which reads exactly like "you have no private repos".
+    The map is required on the owner's machine, the only place this kit runs. Missing or
+    unreadable raises PolicyError: an empty map reads exactly like "you have no private repos".
     """
     path = VIS_PATH
-    if not _optional_policy_exists(path):
-        # Absent is ORDINARY (a contributor, a fresh machine) and it is also INVISIBLE unless
-        # somebody says it. Without this note the cross-repo layer can be entirely missing -- a
-        # failed refresh, a new machine, a repo not yet registered -- and the run still prints
-        # `clean`, which is the exact ambiguity between "checked" and "not checked" that this
-        # whole codebase exists to remove. It is a note, not an error: on another machine it is correct.
-        if notes is not None:
-            notes.append("pii_guard: NOTE no visibility map at %s -- the cross-repo layer "
-                         "contributed nothing to this run." % path)
-        return None
+    if not os.path.exists(path):
+        raise PolicyError("no visibility map at %s; run refresh_visibility.py" % path)
     vis = _read_json(path)
     if not isinstance(vis, dict):
         raise PolicyError("%s must be an object mapping owner/name to a visibility" % path)
@@ -929,10 +902,7 @@ def derivation_witness(owner, name, public_by_owner):
 
 
 def load_cross_repo_tokens(root, notes=None):
-    loaded = _load_visibility(notes)
-    if loaded is None:
-        return []
-    public_by_owner, private, age_s = loaded
+    public_by_owner, private, age_s = _load_visibility(notes)
     # Only the DERIVED downgrade depends on the map's freshness. The linkage verdicts do not: they
     # come from a repo being listed PRIVATE, and a stale map that still calls something private is
     # erring toward gating, which is the direction that costs an edit rather than a disclosure.
@@ -1065,10 +1035,7 @@ def load_policy(root):
     pol = Policy()
     _probe_matcher()
 
-    path = _denylist_path()
-    if path and _optional_policy_exists(path):
-        pol.denylist_present = True
-        pol.tokens.extend(_parse_denylist(path))
+    pol.tokens.extend(_parse_denylist(_denylist_path()))
     cross = load_cross_repo_tokens(root, pol.notes)
     have = {t.value for t in pol.tokens}
     pol.tokens.extend(t for t in cross if t.value not in have)
@@ -1700,8 +1667,9 @@ def scan_staged(root, allow, pol):
     forever and everyone who cloned already has it. Every leak in the 2026-07 audit passed through
     this exact point, and there was nothing standing here.
 
-    Breach classes only (strict=False): commit time checks only what is being added; pre-push
-    runs the full --tree --history scan.
+    Breach classes only (domain="staged", so the synthetic-namespace EMAIL rule that only
+    domain="tree" applies is off): commit time checks only what is being added; pre-push runs the
+    full --tree --history scan.
     """
     out = []
     # Object bytes are authoritative even when attributes suppress a Git patch or the working
@@ -1956,7 +1924,6 @@ def main():
             detail = "  [%d file(s) scanned, %d skipped]" % (
                 tree_stats.get("scanned", 0),
                 tree_stats.get("enumerated", 0) - tree_stats.get("scanned", 0))
-        layer = "" if pol.denylist_present else "  [private denylist: absent, layer not loaded]"
         if a.history:
             detail += "  [%d commit(s), %d blob(s) scanned; %d tag(s), %d ref name(s) scanned]" % (
                 hist_stats.get("commits", 0), hist_stats.get("blobs_scanned", 0),
@@ -1964,16 +1931,16 @@ def main():
         if unexamined:
             # The word `clean` is reserved for a run that read everything it enumerated. This is
             # the whole distinction between "checked and found nothing" and "did not look".
-            print("pii_guard: no blocking findings (%s)%s%s -- but %d item(s) above were NOT "
+            print("pii_guard: no blocking findings (%s)%s -- but %d item(s) above were NOT "
                   "examined, so this is not a clean bill of health."
-                  % (scope, detail, layer, len(unexamined)))
+                  % (scope, detail, len(unexamined)))
             return 0
         if debts or warns:
-            print("pii_guard: no blocking findings (%s)%s%s -- but %d HISTORY-DEBT and %d WARN "
+            print("pii_guard: no blocking findings (%s)%s -- but %d HISTORY-DEBT and %d WARN "
                   "above are unresolved and will be reported again."
-                  % (scope, detail, layer, len(debts), len(warns)))
+                  % (scope, detail, len(debts), len(warns)))
         else:
-            print("pii_guard: clean (%s)%s%s" % (scope, detail, layer))
+            print("pii_guard: clean (%s)%s" % (scope, detail))
         return 0
 
     print("pii_guard: %d blocking finding(s) -- a real-world identifier is not in the synthetic "

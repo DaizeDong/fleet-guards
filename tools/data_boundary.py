@@ -972,8 +972,6 @@ def _companion_visibility_once(root, env):
         visibility = pii_guard._load_visibility()
     except (OSError, ValueError, pii_guard.PolicyError):
         return [], ["companion visibility receipt could not be verified"]
-    if visibility is None:
-        return [], ["companion has no visibility receipt; visibility is UNKNOWN"]
     public, private, age = visibility
     if age is None or not 0 <= age <= pii_guard.VIS_MAX_AGE_S:
         return [], ["companion visibility receipt is undated, stale or future-dated; visibility is UNKNOWN"]

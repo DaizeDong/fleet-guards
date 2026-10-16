@@ -8,7 +8,8 @@ The commit and push hooks use `publication_guard.py`. A fresh proof must identif
 every stored and effective fetch/push destination as PRIVATE before private content is permitted.
 An explicit push URL must also belong to the proven configured push routes. A push that only
 deletes refs is not scanned. The hooks use the installed visibility receipt
-`~/.pii-guard/visibility.json`. Missing evidence retains the full public checks.
+`~/.pii-guard/visibility.json`. Stale or unproved evidence retains the full public checks. A missing
+receipt or a missing `~/.pii-denylist.json` blocks: `pii_guard.py` exits 2 without them.
 
 For verified PRIVATE repositories, declared DATA and private references are permitted. Manifest,
 path, schema, fixture, run-shape and sealed-path checks still run, and the pre-commit identity
