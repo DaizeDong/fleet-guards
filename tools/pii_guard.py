@@ -899,9 +899,8 @@ VISIBILITY_STATES = ("PUBLIC", "PRIVATE", "UNKNOWN")
 # Two thresholds, because the two failures are different sizes:
 #   NOTE   the refresher runs every 4 hours, so a day-old map means it has missed about six runs.
 #          Worth saying, not worth gating: nothing is wrong with the verdicts yet.
-#   MAX    30 days, deliberately the same number visibility_of.py uses for MAX_MAP_AGE_S and for the
-#          same reason recorded there: seven days is shorter than a holiday, and a window nothing
-#          renews is a time bomb with a documented fuse. Past it the map is not evidence any more,
+#   MAX    30 days: seven days is shorter than a holiday, and a window nothing renews is a time
+#          bomb with a documented fuse. Past it the map is not evidence any more,
 #          so every name that WOULD have been `derived` stays `linkage` and keeps gating. Strict is
 #          the safe direction here, and it is also what this guard did before derivability existed.
 VIS_STALE_NOTE_S = 24 * 3600
@@ -958,10 +957,8 @@ def _load_visibility(vis_path=None, notes=None):
 def _map_age_s(vis, path, notes):
     """Seconds since the map was last REBUILT, or None if that cannot be established.
 
-    From the `_refreshed` stamp and NEVER from the file's mtime. visibility_of.py writes single
-    keys back into this map on a cache miss, which bumps the mtime without re-verifying one single
-    answer, so mtime says "recently touched" for a map whose verdicts are months old. That is
-    documented at length in visibility_of.py and it is the kind of thing you only get wrong once.
+    From the `_refreshed` stamp and NEVER from the file's mtime: a touch without a rebuild would make
+    a map whose verdicts are months old look fresh.
     """
     stamp = vis.get("_refreshed") if isinstance(vis, dict) else None
     if not isinstance(stamp, str) or not stamp.strip():
