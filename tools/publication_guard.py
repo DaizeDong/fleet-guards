@@ -8,7 +8,9 @@ import shutil
 import stat
 import sys
 
-import data_boundary as boundary
+# Consumers also load this file by path (importlib), where tools/ is not on sys.path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import data_boundary as boundary  # noqa: E402
 
 
 def unaliased_absolute(path):
