@@ -1,17 +1,15 @@
 # Shared Python API
 
-Version 0.2.1 packages the credential scanner, filesystem primitives and canonical runtime tools used by
-Python consumers. Install a wheel built from an accepted source revision and
-record both the revision and wheel hash in the deployment lock.
+Version 0.2.1 packages the credential scanner, filesystem primitives and runtime access to the
+canonical tools used by Python consumers. Install it editable from the machine's checkout:
 
-`fleet_guards.runtime` exposes the existing companion resolver and the live
-visibility query. The wheel maps four canonical `tools/` modules into an internal
-namespace at build time; their bytes match the source files. There is no second
-resolver implementation. Source toolkit calls keep their existing discovery
-context, while package callers must supply their own source or installation root.
-The older `fleet_guards.datadir` and `_datadir` module names remain absent.
-Importing the package or its CLI does not load the resolver. Git hooks and
-publication policy retain their existing paths.
+    pip install -e "$(git config --get fleet.guards)"
+
+`fleet_guards.runtime` loads `tools/datadir.py` and `tools/storage_contract.py` from that checkout,
+so there is one implementation and no second copy. If the package cannot find them it raises
+`ImportError` telling you to run the install command above. Importing the package or its CLI does
+not load the resolver. Git hooks run from the same checkout through each consumer's `.githooks/`
+shims.
 
 ## Companion discovery
 
@@ -23,12 +21,23 @@ companion = resolver.resolve_companion_root("example-tool")
 data = resolver.resolve_data_dir("example-tool")
 ```
 
-The bound root controls sibling discovery and own-source exclusion. It must be
-absolute, and each resolver retains its own immutable binding. Existing source
-toolkit calls without `source_root` still derive the consumer above a Guards
-submodule. Discovery identifies a location; it does not establish artifact
-ownership. There is no runtime PRIVATE proof or write admission: PRIVATE
-publication is enforced at commit time by the hooks and CI.
+The bound root controls sibling discovery and own-source exclusion. It must be absolute, and each
+resolver retains its own immutable binding. Every resolver entry point requires `source_root`;
+nothing is inferred from where the kit is installed. Discovery identifies a location; it does not
+establish artifact ownership. There is no runtime PRIVATE proof or write admission: PRIVATE
+publication is enforced at commit time by the hooks.
+
+## Storage contracts
+
+```python
+from fleet_guards.runtime import storage_contract
+
+contract = storage_contract()
+policy = contract.validate_contract(absolute_companion_root)
+```
+
+`storage_contract()` returns the canonical `tools/storage_contract.py` module; see
+[docs/STORAGE_CONTRACT.md](docs/STORAGE_CONTRACT.md).
 
 ## Credential scanning
 

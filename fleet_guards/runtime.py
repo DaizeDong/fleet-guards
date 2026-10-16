@@ -1,6 +1,8 @@
-"""Consumer-bound access to the canonical companion resolver.
+"""Consumer access to the canonical companion resolver and storage contract.
 
-PRIVATE publication is enforced at commit time by the hooks and CI, not by a runtime proof.
+The modules are loaded from tools/ of the fleet-guards checkout this package is editable-installed
+from (pip install -e "$(git config --get fleet.guards)"). PRIVATE publication is enforced at commit
+time by the consumer's .githooks shims, not by a runtime proof.
 """
 from dataclasses import dataclass
 import importlib.util
@@ -9,6 +11,7 @@ import sys
 import threading
 
 _LOAD_LOCK = threading.RLock()
+_TOOLS = Path(__file__).resolve().parent.parent / "tools"
 
 
 def _canonical(name):
@@ -17,13 +20,11 @@ def _canonical(name):
 
 
 def _load_canonical(name):
-    directory = Path(__file__).resolve().parent / "_canonical"
-    if not directory.is_dir():
-        source = directory.parent.parent
-        if not (source / ".git").exists() or not (source / "pyproject.toml").is_file():
-            raise ImportError("canonical Guards tools are missing; reinstall the accepted wheel")
-        directory = source / "tools"
-    path = directory / (name + ".py")
+    path = _TOOLS / (name + ".py")
+    if not path.is_file():
+        raise ImportError(
+            "fleet_guards cannot find %s; install it editable from the checkout: "
+            'pip install -e "$(git config --get fleet.guards)"' % path)
     key = "_fleet_guards_canonical_" + name
     previous = sys.modules.get(key)
     if previous is not None and Path(previous.__file__).resolve() == path:
@@ -68,3 +69,8 @@ class CompanionResolver:
 def companion_resolver(*, source_root):
     """Bind discovery to an explicit consumer source root, never the Guards installation."""
     return CompanionResolver(source_root)
+
+
+def storage_contract():
+    """The canonical storage_contract module (schema validation and path ownership)."""
+    return _canonical("storage_contract")

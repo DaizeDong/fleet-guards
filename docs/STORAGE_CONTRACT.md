@@ -55,11 +55,11 @@ that grants an ignored-path exception.
 There is no runtime write admission. A writer resolves its companion with the
 shared resolver, keeps its outputs to its declared artifacts inside that companion
 and never writes inside the public source tree. PRIVATE publication of the
-companion is enforced at commit time by the hooks and CI, not by a runtime proof.
+companion is enforced at commit time by the hooks, not by a runtime proof.
 
 The reusable validation/matching primitives retain Smith's existing names:
 `CONTRACT`, `FIELDS`, `CLASSES`, `SEPARATE`, `COMBINED`, `relative_path`,
 `validate_contract(repo)`, `in_data_scope`, `matches`, `no_links`, `owners`, and
 `canonical_hash`. Validation propagates filesystem failures; a missing or
-unreadable contract is not an empty policy. The Guards `tools/` API is consumed
-through the pinned checkout.
+unreadable contract is not an empty policy. Consumers load the module through
+`fleet_guards.runtime.storage_contract()`.

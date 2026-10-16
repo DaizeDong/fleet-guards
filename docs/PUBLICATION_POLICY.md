@@ -1,24 +1,21 @@
 # Publication policy
 
-Run `python guards/tools/publication_guard.py ci` from a consumer root to apply the same visibility policy as its normal hooks and CI. Direct scanner commands remain public-policy diagnostics.
+The consumer's `.githooks/` shims run `publication_guard.py` from the checkout named by `git config fleet.guards`. Direct scanner commands remain public-policy diagnostics.
 
 ## Visibility and normal entrypoints
 
-The normal hooks and composite CI action use `publication_guard.py`. A fresh proof must identify
+The commit and push hooks use `publication_guard.py`. A fresh proof must identify
 every stored and effective fetch/push destination as PRIVATE before private content is permitted.
 An explicit push URL must also belong to the proven configured push routes. A push that only
-deletes refs is not scanned. Local hooks use the
-installed visibility receipt; GitHub Actions obtains current repository metadata from the canonical
-GitHub API using its job token. Missing evidence retains the full public checks.
-The metadata client rejects custom CA, proxy and TLS key-log environment settings before any
-credential-bearing request. It verifies TLS with default trust, forbids redirects, and requires
-the response URL and repository identity to match the requested canonical API endpoint.
+deletes refs is not scanned. The hooks use the installed visibility receipt
+`~/.pii-guard/visibility.json`. Missing evidence retains the full public checks.
 
 For verified PRIVATE repositories, declared DATA and private references are permitted. Manifest,
 path, schema, fixture, run-shape and sealed-path checks still run, and the pre-commit identity
 assertion remains mandatory. The output names the proven repositories and states that public-content
 scanning is out of scope. Public and unknown repositories receive the full PII and data-boundary
-checks. Explicit `pii_guard.py --tree --history` and `data_boundary.py` invocations remain public-policy
+checks: at commit `pii_guard.py --staged` (only what is being committed), at push
+`pii_guard.py --tree --history`. Explicit `pii_guard.py --tree --history` and `data_boundary.py` invocations remain public-policy
 diagnostics regardless of visibility; private-only content can produce findings in those diagnostics.
 
 ## Public source boundary
@@ -31,7 +28,7 @@ files and empty declared directories. Keep public tool DATA in a separate privat
 Staged and range scans compare decoded Git blobs, so UTF-16 editor files receive the same
 addition-only checks as UTF-8. Unchanged and removed lines stay outside those incremental scans;
 merge additions must be new against every parent. Range scans also check newly introduced paths,
-including rename destinations and gitlinks. Tree scans exclude indexed submodules from their parent;
+including rename destinations and gitlinks. Tree scans exclude indexed gitlinks from their parent;
 scan each child repository separately to check its content.
 All Git discovery and object reads use original objects, including commit and tag metadata.
 Replacement objects cannot conceal reachable history. Hook repository selectors and the selected

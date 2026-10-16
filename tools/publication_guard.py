@@ -1,18 +1,12 @@
 """Apply publication policy to the invoking repository, with proven private scope."""
 import argparse
 from contextlib import contextmanager
-import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import shutil
 import stat
-import ssl
 import sys
-import tempfile
-import urllib.error
-import urllib.request
 
 
 # ------------------------------------------------- spawning processes (identical in every kit file)
@@ -47,11 +41,6 @@ def _no_window(**kwargs):
     if _console_less_windows():
         kwargs["creationflags"] = flags | 0x08000000      # CREATE_NO_WINDOW
     return kwargs
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, request, file, code, message, headers, url):
-        return None
 
 
 def unaliased_absolute(path):
@@ -96,36 +85,6 @@ def native_hook_environment(phase):
             os.environ.update(selected)
 
 
-def github_visibility(repository, token):
-    """Read authoritative metadata from the canonical API without forwarding credentials."""
-    if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
-            or any(part in {".", ".."} for part in repository.split("/"))):
-        raise ValueError("Repository metadata requires a canonical owner/name")
-    unproved = {"http_proxy", "https_proxy", "all_proxy", "ssl_cert_file", "ssl_cert_dir",
-                "curl_ca_bundle", "requests_ca_bundle", "sslkeylogfile"}
-    if any(key.casefold() in unproved for key in os.environ):
-        raise ValueError("Repository metadata TLS or proxy environment is unproved")
-    request = urllib.request.Request(
-        "https://api.github.com/repos/" + repository,
-        headers={"Accept": "application/vnd.github+json", "Authorization": "Bearer " + token,
-                 "User-Agent": "fleet-guards", "X-GitHub-Api-Version": "2022-11-28"})
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), NoRedirect(),
-        urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-    with opener.open(request, timeout=15) as response:
-        if response.geturl() != request.full_url:
-            raise ValueError("Repository metadata response changed the requested destination")
-        metadata = json.load(response)
-    if (not isinstance(metadata, dict)
-            or str(metadata.get("full_name", "")).casefold() != repository.casefold()):
-        raise ValueError("Repository metadata does not identify the requested destination")
-    if metadata.get("private") is True and metadata.get("visibility") == "private":
-        return "PRIVATE"
-    if metadata.get("private") is False and metadata.get("visibility") == "public":
-        return "PUBLIC"
-    return "UNKNOWN"
-
-
 def configured_urls(boundary, context, push_only=False):
     """Enumerate actual Git-expanded routes in both contexts without contacting them."""
     root, physical, effective = context
@@ -142,29 +101,7 @@ def configured_urls(boundary, context, push_only=False):
 def private_proof(boundary, root, phase, destination):
     """Only a complete fresh proof can select private policy; uncertainty stays public."""
     try:
-        if phase == "ci" and os.environ.get("GITHUB_ACTIONS") == "true":
-            token = os.environ.get("GITHUB_TOKEN")
-            if not token:
-                raise boundary.GitError("CI repository metadata credential is unavailable")
-            context = boundary._companion_git_context(root)
-            repositories = set()
-            for urls in configured_urls(boundary, context):
-                for url in urls:
-                    key, _host = boundary._github_publication_route(url)
-                    if key is None:
-                        raise boundary.GitError("CI publication destination is UNKNOWN")
-                    repositories.add("%s/%s" % key)
-            receipt = {name: github_visibility(name, token) for name in sorted(repositories)}
-            from pii_guard import _utcnow
-            receipt["_refreshed"] = _utcnow()
-            with tempfile.TemporaryDirectory(prefix="guard-visibility-") as temporary:
-                if Path(temporary).resolve().is_relative_to(Path(root).resolve()):
-                    raise boundary.GitError("Visibility metadata must stay outside the worktree")
-                path = Path(temporary) / "visibility.json"
-                path.write_text(json.dumps(receipt), encoding="utf-8")
-                proof = boundary.prove_private_companion(root, path)
-        else:
-            proof = boundary.prove_private_companion(root)
+        proof = boundary.prove_private_companion(root)
         if phase == "pre-push" and destination:
             if not all(destination in urls for urls in configured_urls(boundary, proof._context, True)):
                 raise boundary.GitError("Actual push destination is outside the PRIVATE proof")
@@ -172,14 +109,14 @@ def private_proof(boundary, root, phase, destination):
         return proof
     except boundary.GitError as error:
         print("publication_guard: PRIVATE scope not proven; public policy applies. " + str(error), flush=True)
-    except (urllib.error.URLError, OSError, ValueError, TypeError):
-        print("publication_guard: authoritative visibility metadata unavailable; public policy applies.", flush=True)
+    except (OSError, ValueError, TypeError):
+        print("publication_guard: visibility receipt unavailable; public policy applies.", flush=True)
     return None
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("pre-commit", "pre-push", "ci"))
+    parser.add_argument("phase", choices=("pre-commit", "pre-push"))
     parser.add_argument("--repo", default=".")
     parser.add_argument("--push-destination", default="")
     arguments = parser.parse_args()
@@ -202,7 +139,8 @@ def main():
             return boundary.main(private_proof=proof)
         finally:
             sys.argv = previous
-    scope = ["--tree", "--staged" if arguments.phase == "pre-commit" else "--history"]
+    # Commit checks only what is being committed; push checks everything being published.
+    scope = ["--staged"] if arguments.phase == "pre-commit" else ["--tree", "--history"]
     for name, options in (("pii_guard.py", scope), ("data_boundary.py", [])):
         result = subprocess.run([sys.executable, str(kit / name), "--repo", arguments.repo, *options],
                                 **_no_window())

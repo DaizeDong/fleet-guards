@@ -1,11 +1,10 @@
 # fleet-guards
 
-Shared publication guards for Git repositories: nine detection rules, a data boundary, and hooks that block when required checks are unavailable. Consumers pin the kit as a Git submodule.
+Shared publication guards for Git repositories: nine detection rules, a data boundary, and hooks that block when required checks are unavailable. The kit runs from one local checkout per machine; consumers opt in with two small hook shims.
 
-Python consumers can build the [shared filesystem, credential and runtime package](PACKAGE.md).
-Its versioned API and wheel are separate from the Git hook entrypoints.
+Python consumers use the [installed runtime package](PACKAGE.md) for companion discovery and storage contracts.
 
-[![Guard Kit](https://img.shields.io/badge/Guard%20Kit-Git%20Submodule-orange?style=flat)](#install)
+[![Guard Kit](https://img.shields.io/badge/Guard%20Kit-Local%20Checkout-orange?style=flat)](#install)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Detection Rules](https://img.shields.io/badge/Detection%20Rules-9-green?style=flat)](#what-is-in-here)
 [![Languages](https://img.shields.io/badge/Languages-EN%20%2F%20CN-blue?style=flat)](#languages)
@@ -23,13 +22,14 @@ The kit combines structural storage rules, identifier scanning and explicit fail
 
 **Allow declared synthetic identifiers.** Structural rules flag identifiers outside the synthetic namespace. A private term list supplements those rules for names they cannot infer. The public scanner contains no private identifiers; the private list stays outside public repositories.
 
-**Report incomplete checks as failures.** Missing scanners, empty submodules, absent declarations and failed Git reads must block the affected check. Reports distinguish a completed scan with no findings from a scan that never ran.
+**Report incomplete checks as failures.** A missing kit checkout, an unset `fleet.guards`, absent declarations and failed Git reads must block the affected check. Reports distinguish a completed scan with no findings from a scan that never ran.
 
 ## What it is (and isn't)
 
-It is the fleet's security kit: the scanner, the data boundary, the companion resolver, the Git
-hooks, and a composite CI action, consumed by other repositories as a submodule at `guards/`. Only
-repositories that include it are checked; there is no machine-wide hook.
+It is the fleet's security kit: the scanner, the data boundary, the companion resolver and the Git
+hooks. It lives in one checkout per machine, named by the global git config key `fleet.guards`.
+Only repositories that opt in with the `.githooks/` shims are checked; there is no machine-wide hook
+and no CI step.
 
 Nine detection rules, implemented as 38 regexes across five tools. What they actually block:
 
@@ -48,49 +48,68 @@ Nine detection rules, implemented as 38 regexes across five tools. What they act
 Plus 13 filename patterns that recognise real-run output, four false-positive suppressors, and
 twelve pure text helpers that carry no security role at all.
 
-This repository is a Git/CI toolkit without a Claude Code skill or plugin entrypoint. Style and loading-budget checks belong to `fleet-style`; the original `dash_guard` and `load_budget` split moved 17.5% of this kit into that separate scope. Keep this submodule public so public consumers can fetch it in CI.
+This repository is a Git hook toolkit without a Claude Code skill or plugin entrypoint. Style and loading-budget scripts belong to `fleet-style`.
 
 ## Install
 
-    git submodule add -b main https://github.com/DaizeDong/fleet-guards.git guards
-    git config core.hooksPath .githooks
+Once per machine:
 
-Commit fail-closed `.githooks/pre-commit` and `.githooks/pre-push` forwarding shims as part of
-installation. A shim must stop if `guards/hooks/<hook>` is missing, then execute that hook. Pointing
-Git directly at an empty submodule disables the gate silently; the committed shims are what detect
-an incomplete clone.
+    git clone https://github.com/DaizeDong/fleet-guards.git <path>
+    git config --global fleet.guards <path>        # forward slashes, e.g. C:/src/fleet-guards
+    pip install -e "$(git config --get fleet.guards)"
+
+The checkout stays on `main`. Edits to the kit happen in a `git worktree` of it, so the checkout the
+hooks run from is never half-edited. To try a worktree's hooks before merging, override the key for
+one command: `git -c fleet.guards=<worktree> commit ...`.
+
+## Opting a repository in
+
+Commit two shims and point the repository's hooks at them:
+
+    git config core.hooksPath .githooks
+    git update-index --chmod=+x .githooks/pre-commit .githooks/pre-push
+
+`.githooks/pre-commit`:
+
+```sh
+#!/bin/sh
+# Privacy checks run from the local fleet-guards checkout named by git config fleet.guards.
+G=$(git config --get fleet.guards)
+if [ -z "$G" ] || [ ! -s "$G/hooks/pre-commit" ]; then
+  echo "BLOCKED: git config fleet.guards is unset or has no hooks/pre-commit; nothing was checked." >&2
+  exit 1
+fi
+exec sh "$G/hooks/pre-commit" "$@"
+```
+
+`.githooks/pre-push` is the same with `hooks/pre-push` in both places. A repository that also uses
+the `fleet-style` dash check adds that block before the `exec` (see the fleet-style README).
+
+The shims read `fleet.guards` with plain `git config --get`, so `git -c fleet.guards=...` overrides
+it. An unset key or a checkout without the hook blocks; there is no fallback location.
+
+A repository that uses Git LFS must call LFS's own hooks from its `.githooks/` shims
+(`git lfs pre-push "$@"` before the `exec` in pre-push, and the matching post-checkout,
+post-commit and post-merge shims), because `core.hooksPath=.githooks` replaces the directory
+where `git lfs install` put them.
+
+Each repository keeps its own `.pii-allow` and `.dataclass.json`: which findings are exempt and
+which paths are TOOL, FIXTURE or DATA are facts about that repository.
+
+## What runs
 
 `hooks/pre-commit` holds the logic for both phases; `hooks/pre-push` re-executes it with
-`--phase pre-push`. The pre-commit phase first asserts the commit identity against
-`~/.pii-guard/identities.conf`, then runs `publication_guard.py`. The pre-push phase skips pushes
-that only delete refs. Both call `python` directly; a missing or broken interpreter returns nonzero
-and blocks.
+`--phase pre-push`.
 
-Use the HTTPS URL in `.gitmodules` so other machines and CI can resolve it. A local SSH host alias caused all three workflows in the first migration to fail with "Could not read from remote repository".
+- **Commit:** the identity assertion against `~/.pii-guard/identities.conf`, then
+  `publication_guard.py pre-commit`, which runs `pii_guard.py --staged` (only what is being
+  committed) and `data_boundary.py`.
+- **Push:** `publication_guard.py pre-push`, which runs `pii_guard.py --tree --history` and
+  `data_boundary.py`. A push that only deletes refs publishes nothing and is skipped.
 
-Clone with `--recursive`, or run `git submodule update --init` afterwards. CI must set
-`submodules: true` on `actions/checkout`.
+Both call `python` directly; a missing or broken interpreter returns nonzero and blocks.
 
-## Quick start
-
-Add the composite action after checkout and Python setup:
-
-```yaml
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0        # the history scan is the point; a shallow clone would see nothing
-          submodules: true
-      - uses: actions/setup-python@v5
-      - uses: ./guards/ci/pii-guard
-```
-
-Run the publication policy by hand from a consumer's root:
-
-```bash
-python guards/tools/publication_guard.py ci
-```
-
-Normal hooks and CI apply the [publication policy](docs/PUBLICATION_POLICY.md). Current evidence must prove every stored and effective fetch/push destination PRIVATE before private content is admitted. Missing evidence retains full public checks. Manifest, schema, fixture, path and identity requirements still apply to PRIVATE repositories.
+The [publication policy](docs/PUBLICATION_POLICY.md) decides scope. Current evidence must prove every stored and effective fetch/push destination PRIVATE before private content is admitted. Missing evidence retains full public checks. Manifest, schema, fixture, path and identity requirements still apply to PRIVATE repositories.
 
 Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always use public policy. For companion admission, including receipt freshness and supported transports, follow [COMPANION.md](COMPANION.md#verifying-a-companion).
 
@@ -98,24 +117,15 @@ Direct `pii_guard.py --tree --history` and `data_boundary.py` commands always us
 
 | Path | What it is |
 | --- | --- |
-| `tools/pii_guard.py` | The scanner. Allowlist based, structural, runs over the working tree and the full history. |
+| `tools/pii_guard.py` | The scanner. Allowlist based, structural, runs over staged changes, the working tree or the full history. |
 | `tools/data_boundary.py` | Checks declared classes, fixtures and real-output boundaries. |
-| `tools/publication_guard.py` | Applies proven repository visibility to normal hook and CI policy. |
+| `tools/publication_guard.py` | Applies proven repository visibility to the commit and push policy. |
 | `tools/datadir.py` | The resolver. Decides where real-run output goes, which is always outside the repository. |
-| `tools/fleet_sync.py` | Dispatches verified upstream updates and advances consumer gitlinks. |
+| `tools/storage_contract.py` | Validates a companion's `storage.contract.json` and path ownership. |
+| `fleet_guards/` | The installed package; `fleet_guards.runtime` exposes the resolver and storage contract. |
 | `hooks/` | `pre-commit` (both phases) and `pre-push` (re-executes it), the bodies the consumer's shims forward into. |
-| `ci/pii-guard/action.yml` | The composite action every consumer references by local path. |
-| `templates/fleet-sync.yml` | The one workflow a consumer copies to enroll in automatic synchronization. |
-| `templates/upstream-notify.yml` | The workflow a custom or private upstream copies to notify its own consumers. |
+| `.githooks/` | This repository's own opt-in shims. |
 | `COMPANION.md` | The contract between a public repository and its private companion. |
-| `docs/AUTOMATIC_SYNC.md` | How a consumer enrolls, and why the dispatch path is what it is. |
-
-## How to update a consumer
-
-    git submodule update --remote guards
-    git add guards && git commit -m "guards: bump"
-
-A submodule pins one commit. Consumers update manually with the commands above, or enroll in [automatic synchronization](docs/AUTOMATIC_SYNC.md). Once enrolled, a successful upstream check sends a dispatch event and the consumer records a normal gitlink update commit on its default branch. Its commit gates and CI still run. The same path can follow other repositories on a declared branch and gate workflow, private ones included, though a private upstream belongs only in private consumers because a public consumer exposes its name; see [Private or custom upstreams](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams).
 
 ## Example output
 
@@ -130,38 +140,20 @@ data_boundary: clean (0 DATA + 0 sealed paths not tracked, 0 FIXTUREs generator-
 
 Reports include examined and excluded counts so readers can distinguish coverage from an empty or incomplete scan.
 
-## The failure mode to know about
-
-A plain `git clone` without `--recursive` leaves `guards/` EMPTY. So does a CI checkout without
-`submodules: true`. The hooks fail closed on a missing scanner, so that state blocks a commit loudly
-rather than passing in silence, which is the only reason this arrangement is safe. If the guards
-directory is ever empty, the answer is `git submodule update --init`, never `--no-verify`.
-
 ## Starting processes on Windows
 
 Every process the kit starts goes through `_no_window()`. A console program started by a process
 with no console of its own (`pythonw`, a scheduled task, a service) otherwise gets a visible window.
 The helper adds `CREATE_NO_WINDOW` only when the calling process has no console, so a hook's
 unredirected output is never hidden, and it refuses `DETACHED_PROCESS` and `CREATE_NEW_CONSOLE`.
-Each tool file carries its own copy, because consumers load these files one at a time by path.
+Each tool file carries its own copy, because the tools are loaded one at a time by path.
 
 ## Limitations
 
-The following compatibility observations came from a consumer checkout. They describe that validation scope, not every possible consumer configuration.
-
 The pre-commit framework refuses to install: `pre-commit install` prints "Cowardly refusing to
 install hooks with `core.hooksPath` set" and hints that you unset it. Following that hint leaves a
-working formatter and no gate. The stub in `.githooks/` calls `pre-commit run` itself when a config
-and the binary are both present, so both run and the guard stays last: a formatter that rewrites
-files cannot slip the change past the scan.
-
-The kit passed ruff's default rules in that check. A stricter configuration reported 155 requests to replace %-formatting with f-strings. Consumers applying their own lint policy can exclude submodules with `extend-exclude = ["guards", "style"]`.
-
-A module of yours with the same name as one here wins. With the repository's own directory first on
-`sys.path`, `import datadir` resolves to the repository's, not the kit's. The reverse only happens if
-you put the kit's path first, which is a choice.
-
-The kit ships no tests, so a consumer's `pytest` collects nothing from `guards/`.
+working formatter and no gate. Call `pre-commit run` from the `.githooks/pre-commit` shim before the
+`exec` instead, so a formatter that rewrites files cannot slip the change past the scan.
 
 **Private facts in prose remain a gap.** Keeping DATA outside public source prevents accidental inclusion of those files. Structural rules recognize identifiers and the private list recognizes configured names, but neither establishes that prose contains no private facts. Public examples must use synthetic data.
 
@@ -172,6 +164,3 @@ English (`README.md`) · 中文 (`README_CN.md`)
 ## Roadmap · Contributing · License
 
 See [ROADMAP.md](ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) · [COMPANION.md](COMPANION.md).
-
-The deviations from the house repository spec, and the reasons for each, are recorded in
-[docs/2026-09-22-spec-adaptation.md](docs/2026-09-22-spec-adaptation.md).

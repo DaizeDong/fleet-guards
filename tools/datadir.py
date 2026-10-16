@@ -68,11 +68,12 @@ path inside the repo. A silent in-repo fallback is how this happened: `reference
 documented "legacy fallback", and the operator's real SEC contact email ended up committed in it.
 A fallback into the repo is not a convenience, it is the leak.
 
-Reached through the guards submodule as `guards/tools/datadir.py`. Stdlib only.
+Consumers reach it through the installed package: fleet_guards.runtime.companion_resolver(
+source_root=<absolute repo root>). Every entry point takes source_root explicitly; nothing is
+inferred from where this file sits. Stdlib only.
 """
 import os
 import re
-import stat
 from pathlib import Path
 
 
@@ -97,65 +98,17 @@ def _config_env_vars(skill):
     return (stem + "_CONFIG", stem + "_CONFIG_DIR")
 
 
-def _marker_mode(path):
-    """Return marker metadata; only a missing path establishes absence."""
-    try:
-        return os.stat(path).st_mode
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise DataDirResolutionError(
-            "Cannot inspect repository marker %s; output is not authorized" % path) from exc
-
-
-def _own_repo_root():
-    """The git worktree whose data this module is protecting, or None.
-
-    Walks parents looking for `.git`. Deliberately does not shell out: this runs inside live skills
-    on machines where git may be absent, and a probe that can fail open is not a check.
-
-    Both submodules and linked worktrees have gitfiles. A linked worktree's gitdir carries
-    `commondir`, so it is a boundary in its own right. A submodule's gitfile lets the walk
-    continue to its containing consumer. Retain a gitfile root when no parent exists, as with
-    a standalone repository using --separate-git-dir. No directory name identifies a consumer.
-    """
-    # Installed aliases must protect the consumer containing the physical module.
-    d = os.path.dirname(os.path.realpath(__file__))
-    gitfile_root = None
-    while True:
-        g = os.path.join(d, ".git")
-        mode = _marker_mode(g)
-        if mode is not None and stat.S_ISDIR(mode):
-            return d
-        if mode is not None and stat.S_ISREG(mode):
-            gitfile_root = d
-            line = Path(g).read_text(encoding="utf-8").strip()
-            if not line.startswith("gitdir:") or not line[7:].strip():
-                raise RuntimeError("Cannot determine the tool repository from its gitfile: %s" % g)
-            gitdir = Path(d) / line[7:].strip()
-            common_mode = _marker_mode(gitdir / "commondir")
-            if common_mode is not None and stat.S_ISREG(common_mode):
-                return d
-        parent = os.path.dirname(d)
-        if parent == d:
-            return gitfile_root
-        d = parent
-
-
 def _source_root(source_root):
-    if source_root is None:
-        return _own_repo_root()
+    """The consumer repository whose output is being placed. Callers always name it."""
     path = Path(source_root)
     if not path.is_absolute():
         raise ValueError("source_root must be absolute")
     return str(path.resolve())
 
 
-def _reject_if_inside_own_repo(p, skill, *, source_root=None):
+def _reject_if_inside_own_repo(p, skill, *, source_root):
     try:
         root = _source_root(source_root)
-        if root is None:
-            return                   # not deployed from a worktree; nothing to be inside of
         target, repo = os.path.realpath(str(p)), os.path.realpath(root)
     except OSError as exc:
         raise DataDirResolutionError(
@@ -175,7 +128,7 @@ def _reject_if_inside_own_repo(p, skill, *, source_root=None):
 
 
 
-def assert_outside_own_repo(p, skill, *, source_root=None):
+def assert_outside_own_repo(p, skill, *, source_root):
     """PUBLIC name for the own-repo rejection. Callers outside this module use THIS.
 
     It is a one-line wrapper and it has now been deleted twice by refactors that saw a private
@@ -191,7 +144,7 @@ def assert_outside_own_repo(p, skill, *, source_root=None):
     return _reject_if_inside_own_repo(p, skill, source_root=source_root)
 
 
-def _convention_roots(skill, *, source_root=None):
+def _convention_roots(skill, *, source_root):
     """The fleet convention: a skill's companion repo is its SIBLING, named `<skill>-config`.
 
     Every companion repo in this fleet already follows this. Nothing looked for it, and that
@@ -207,15 +160,11 @@ def _convention_roots(skill, *, source_root=None):
     skill as having no data, and an out-of-band coverage check counted them as SKIP. Three real
     private repos were invisible to the boundary tooling, and the report was green.
 
-    Derived from this file's own worktree rather than a hardcoded path, deliberately. The
+    Derived from the consumer's own source root rather than a hardcoded path, deliberately. The
     absolute location differs per machine, and a home-anchored literal in a public repo is
-    exactly what pii_guard blocks. When this file is NOT inside a worktree (the canonical copy
-    under the scripts directory), there is no sibling to infer and this contributes nothing;
-    only the env vars can then name the companion.
+    exactly what pii_guard blocks.
     """
     root = _source_root(source_root)
-    if root is None:
-        return []
     return [Path(root).parent / ("%s-config" % skill)]
 
 
@@ -229,8 +178,7 @@ class CompanionUnproven(RuntimeError):
 def _remote_url(path):
     """The origin URL from a worktree's shared Git configuration, or None.
 
-    Read as text rather than shelled out to git. Follow a gitdir file for submodules and linked
-    worktrees, then commondir for the shared configuration of a linked worktree.
+    Read as text rather than shelled out to git. Follow a gitdir file for linked worktrees, then commondir for the shared configuration of a linked worktree.
     """
     g = path / ".git"
     cfg = None
@@ -356,7 +304,7 @@ def _unproven_error(skill, dirs):
            "\n".join("      %s" % d for d in dirs), _MARKER, skill, _config_env_vars(skill)[0]))
 
 
-def _candidates(skill, *, source_root=None):
+def _candidates(skill, *, source_root):
     """Discovery order, as (Path, explicit) pairs. See the module docstring.
 
     `explicit` marks a path that carries the operator's INTENT on its face: an environment
@@ -391,7 +339,7 @@ def _candidates(skill, *, source_root=None):
     return out
 
 
-def resolve_companion_root(skill, *, source_root=None):
+def resolve_companion_root(skill, *, source_root):
     """The private companion REPO root for `skill`, or None. Never a path inside the skill's repo.
 
     resolve_data_dir answers "where does real-run output go", which is usually `<companion>/data`.
@@ -433,13 +381,12 @@ def resolve_companion_root(skill, *, source_root=None):
     return None
 
 
-def resolve_data_dir(skill, create=False, *, source_root=None):
+def resolve_data_dir(skill, create=False, *, source_root):
     """Return the private data dir for `skill`, or None if the tool is uninitialized.
 
     Raises DataDirInsideOwnRepo if the resolved directory sits inside this skill's own repo, and
     CompanionUnproven if the only thing found was a directory that cannot show it is the companion.
-    Package callers supply source_root to bind sibling discovery and source exclusion to the
-    consumer. Standalone toolkit calls omit it and retain submodule-based discovery.
+    source_root binds sibling discovery and source exclusion to the consumer repository.
     """
     candidates = _candidates(skill, source_root=source_root)
     unproven = []
@@ -473,7 +420,7 @@ def resolve_data_dir(skill, create=False, *, source_root=None):
     return None
 
 
-def data_path(skill, relpath, create=False, *, source_root=None):
+def data_path(skill, relpath, create=False, *, source_root):
     """Resolve <private data dir>/<relpath>. Never returns a path inside the repo."""
     base = resolve_data_dir(skill, create=create, source_root=source_root)
     if base is None:
@@ -500,7 +447,7 @@ def data_path(skill, relpath, create=False, *, source_root=None):
 
 
 def _cli(argv=None):
-    """`python tools/datadir.py --path <skill> [relpath]` -> print the resolved path, or fail.
+    """`python tools/datadir.py --source-root <repo> --path <skill> [relpath]` -> print it, or fail.
 
     Runbooks and shell steps need the path too, and the alternative is that someone hardcodes
     `metrics/foo.jsonl` into a doc because it was the only thing they could type -- which is how
@@ -512,6 +459,8 @@ def _cli(argv=None):
     import sys
 
     ap = argparse.ArgumentParser(description="Resolve a skill's private data path.")
+    ap.add_argument("--source-root", required=True,
+                    help="absolute root of the consumer repository the data belongs to")
     ap.add_argument("--path", action="store_true", help="print the resolved path")
     ap.add_argument("--create", action="store_true", help="create an absent explicit DATA/CONFIG destination")
     ap.add_argument("skill")
@@ -519,8 +468,9 @@ def _cli(argv=None):
     a = ap.parse_args(argv)
 
     try:
-        p = data_path(a.skill, a.relpath, create=a.create) if a.relpath \
-            else (resolve_data_dir(a.skill, create=a.create) or _raise(a.skill))
+        root = os.path.abspath(a.source_root)
+        p = data_path(a.skill, a.relpath, create=a.create, source_root=root) if a.relpath \
+            else (resolve_data_dir(a.skill, create=a.create, source_root=root) or _raise(a.skill))
     except DataDirNotInitialized as e:
         print(str(e), file=sys.stderr)
         return 3

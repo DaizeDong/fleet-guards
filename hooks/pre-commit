@@ -289,7 +289,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 PUBLICATION="$(cd "$(dirname "$0")/.." && pwd)/tools/publication_guard.py"
 if [ ! -s "$PUBLICATION" ]; then
   echo "BLOCKED: $PUBLICATION is missing or empty, so publication scope is unchecked."
-  echo "Restore the guard kit: git submodule update --init --recursive"
+  echo "Point git config fleet.guards at a complete fleet-guards checkout."
   exit 1
 fi
 

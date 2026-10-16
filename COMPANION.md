@@ -21,7 +21,8 @@ Every source path has one class in `.dataclass.json`:
 
 ## How the companion is found
 
-`tools/datadir.py` probes these locations in order and takes the FIRST ONE THAT EXISTS as a
+`tools/datadir.py`, reached through `fleet_guards.runtime.companion_resolver(source_root=...)`,
+probes these locations in order and takes the FIRST ONE THAT EXISTS as a
 directory. Discovery proves the companion identity described below; PRIVATE publication is enforced at commit time, not at discovery or write time. `<SKILL>` is this repository's name uppercased with hyphens turned into underscores, so
 `small-cap-deepdive` becomes `SMALL_CAP_DEEPDIVE`.
 
@@ -104,7 +105,7 @@ rather than part of this contract. Do not add them to satisfy a checker; nothing
 
 ## Verifying a companion
 
-A companion is verified when it commits or pushes: its own hooks and CI run
+A companion is verified when it commits or pushes: its own `.githooks/` shims run
 `publication_guard.py`, which calls `prove_private_companion` against the visibility receipt
 `~/.pii-guard/visibility.json`.
 
@@ -130,18 +131,18 @@ HTTP version, connection counts, buffering, low-speed limits, and keepalive tuni
 HTTPS authentication may use a single-line Basic or Bearer Authorization header through `http.extraHeader`
 or the canonical `http.https://github.com/.extraHeader` key. Each occurrence is checked independently.
 Other header names, foreign URL scopes, leading whitespace, tabs, embedded line breaks and NUL bytes
-remain unproved. This supports the credential header written by `actions/checkout` without authorizing
-a different destination or trust configuration.
+remain unproved. A supported header authenticates without authorizing a different destination or
+trust configuration.
 
 Certificate, TLS-backend, Git-helper and HTTP request environment overrides produce UNKNOWN unless explicitly supported by the policy. Environment proxies are permitted only when every present spelling of `NO_PROXY`/`no_proxy` provably bypasses `github.com`: either the whole value `*`, or an exact comma-separated `github.com` or `.github.com` entry. Trust overrides are checked separately; an unproved bypass still fails. Git low-speed environment settings do not alter admission. The check never executes an override or prints its value. Restore supported HTTPS settings or use the separately verified SSH policy before retrying; a fresh visibility receipt alone cannot establish a modified connection's destination.
 
 ### Proof API
 
-`prove_private_companion(destination, visibility_map=None)` in `tools/data_boundary.py` is the
-proof the commit-time publication guard and fleet_sync use. It returns an immutable proof
+`prove_private_companion(destination)` in `tools/data_boundary.py` is the
+proof the commit-time publication guard uses. It returns an immutable proof
 with `root`, sorted `repositories`, and an opaque `signature` binding the canonical repository
 administration and physical/effective Git configuration snapshots. It is not a write-time API:
-consumers do not call it before writing DATA. PRIVATE publication is enforced by the hooks and CI.
+consumers do not call it before writing DATA. PRIVATE publication is enforced by the hooks.
 
 Git's default injected `GIT_EXEC_PATH` is normalized
 only by the normal hook entrypoint after resolving the same Git executable and checking its default;

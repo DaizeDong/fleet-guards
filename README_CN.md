@@ -1,11 +1,10 @@
 # fleet-guards
 
-Git 仓库共用的发布检查套件，提供九条检测规则、数据边界和检查缺失时阻断操作的钩子。消费仓通过 Git submodule 固定使用的版本。
+Git 仓库共用的发布检查套件，提供九条检测规则、数据边界和检查缺失时阻断操作的钩子。每台机器只放一份本地 checkout，消费仓用两个很小的钩子转发脚本接入。
 
-Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACKAGE.md)。包版本 0.2.1 将现有
-伴生仓解析器映射进 wheel；消费方显式提供自己的根目录，源码里只保留一份实现。
+Python 消费方通过[已安装的运行时包](PACKAGE.md)取得伴生仓解析和存储契约。
 
-[![守卫套件](https://img.shields.io/badge/%E5%AE%88%E5%8D%AB%E5%A5%97%E4%BB%B6-Git%20%E5%AD%90%E6%A8%A1%E5%9D%97-orange?style=flat)](#安装)
+[![守卫套件](https://img.shields.io/badge/%E5%AE%88%E5%8D%AB%E5%A5%97%E4%BB%B6-%E6%9C%AC%E5%9C%B0%20checkout-orange?style=flat)](#安装)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![检测规则](https://img.shields.io/badge/%E6%A3%80%E6%B5%8B%E8%A7%84%E5%88%99-9-green?style=flat)](#里面有什么)
 [![语言](https://img.shields.io/badge/%E8%AF%AD%E8%A8%80-EN%20%2F%20CN-blue?style=flat)](#语言)
@@ -23,11 +22,11 @@ Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACK
 
 **只放行声明的合成标识符。** 结构规则检查合成命名空间之外的标识符，私有词表补充扫描器无法推断的名称。公开扫描器不携带私有标识符，私有词表保留在公开仓之外。
 
-**检查不完整时失败。** 扫描器缺失、子模块为空、声明不存在或 Git 读取失败，都必须阻断对应检查。报告应区分“检查完成且没有发现”和“没有完成检查”。
+**检查不完整时失败。** 套件 checkout 缺失、`fleet.guards` 没设、声明不存在或 Git 读取失败，都必须阻断对应检查。报告应区分“检查完成且没有发现”和“没有完成检查”。
 
 ## 它是什么（不是什么）
 
-它是舰队的安全套件：扫描器、数据边界、伴生仓解析器、git 钩子，以及一个 composite CI action，由其他仓库以 submodule 形式挂在 `guards/` 上消费。只有装了它的仓库才被检查，没有机器级钩子。
+它是舰队的安全套件：扫描器、数据边界、伴生仓解析器和 git 钩子。每台机器一份 checkout，位置由全局 git 配置项 `fleet.guards` 指定。只有用 `.githooks/` 转发脚本接入的仓库才被检查，没有机器级钩子，也没有 CI 步骤。
 
 九条检测规则，由五个工具里的 38 条正则实现。它们实际挡的是：
 
@@ -43,70 +42,72 @@ Python 消费方可构建[共享文件系统、凭据检查与运行时包](PACK
 | CROSS-REPO | 一个仓点名了另一个仓的私有伴生仓 |
 | DENYLIST | 任何结构规则都推不出来的手工私有词 |
 
-此外还有 13 条识别真实运行产出的文件名模式、四个误报抑制器，以及十二个不承担任何安全职责的纯文本
-辅助函数。
+此外还有 13 条识别真实运行产出的文件名模式、四个误报抑制器，以及十二个不承担任何安全职责的纯文本辅助函数。
 
-本仓通过 Git/CI 使用，没有 Claude Code skill 或 plugin 入口。文风和加载预算检查由 `fleet-style` 维护；最初拆出的 `dash_guard` 和 `load_budget` 占当时套件的 17.5%。本子模块必须保持公开，确保公开消费仓能在 CI 中获取。
+本仓是 Git 钩子工具，没有 Claude Code skill 或 plugin 入口。文风和加载预算脚本由 `fleet-style` 维护。
 
 ## 安装
 
-    git submodule add -b main https://github.com/DaizeDong/fleet-guards.git guards
+每台机器一次：
+
+    git clone https://github.com/DaizeDong/fleet-guards.git <path>
+    git config --global fleet.guards <path>        # 用正斜杠，例如 C:/src/fleet-guards
+    pip install -e "$(git config --get fleet.guards)"
+
+这份 checkout 始终停在 `main`。改套件在它的 `git worktree` 里改，钩子运行的那份 checkout 就永远不会处在改了一半的状态。合并前想用 worktree 里的钩子试一次，只对单条命令覆盖这个配置项：`git -c fleet.guards=<worktree> commit ...`。
+
+## 让一个仓库接入
+
+提交两个转发脚本，并让仓库的钩子指向它们：
+
     git config core.hooksPath .githooks
+    git update-index --chmod=+x .githooks/pre-commit .githooks/pre-push
 
-安装时必须一并提交 fail-closed 的 `.githooks/pre-commit` 和 `.githooks/pre-push` 转发脚本。转发脚本
-必须在 `guards/hooks/<hook>` 缺失时停住，存在时再 exec 过去。让 git 直接指向一个空的 submodule 会静
-默地关掉闸门；被提交进来的转发脚本，正是察觉「克隆不完整」的那个东西。
+`.githooks/pre-commit`：
 
-`hooks/pre-commit` 承载两个阶段的逻辑，`hooks/pre-push` 只是带 `--phase pre-push` 重新执行它。提交阶段先对照 `~/.pii-guard/identities.conf` 断言提交身份，再跑 `publication_guard.py`。推送阶段遇到只删除 ref 的推送直接放行。两者都直接调用 `python`，解释器缺失或不可用时返回非零，即被拦下。
-
-`.gitmodules` 使用 HTTPS URL，确保其他机器和 CI 可以解析。首次迁移使用本机 SSH 主机别名，导致三个 workflow 均以 "Could not read from remote repository" 失败。
-
-克隆时带 `--recursive`，或者事后补 `git submodule update --init`。CI 必须在 `actions/checkout` 上设
-`submodules: true`。
-
-## 快速上手
-
-一个消费仓的整个 workflow 就是 checkout、python，加一行：
-
-```yaml
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0        # 扫历史才是重点；浅克隆等于什么都没扫
-          submodules: true
-      - uses: actions/setup-python@v5
-      - uses: ./guards/ci/pii-guard
+```sh
+#!/bin/sh
+# Privacy checks run from the local fleet-guards checkout named by git config fleet.guards.
+G=$(git config --get fleet.guards)
+if [ -z "$G" ] || [ ! -s "$G/hooks/pre-commit" ]; then
+  echo "BLOCKED: git config fleet.guards is unset or has no hooks/pre-commit; nothing was checked." >&2
+  exit 1
+fi
+exec sh "$G/hooks/pre-commit" "$@"
 ```
 
-在消费仓根目录手工跑发布策略：
+`.githooks/pre-push` 与之相同，两处都换成 `hooks/pre-push`。同时使用 `fleet-style` 破折号检查的仓库，在 `exec` 之前加上那一段（见 fleet-style 的 README）。
 
-```bash
-python guards/tools/publication_guard.py ci
-```
+转发脚本用普通的 `git config --get` 读 `fleet.guards`，所以 `git -c fleet.guards=...` 能覆盖它。配置项没设，或者 checkout 里没有对应钩子，一律拦下；没有任何备用位置。
 
-常规钩子和 CI 使用[发布策略](docs/PUBLICATION_POLICY.md)：只有当前证据证明全部物理及生效 fetch/push 目标均为 PRIVATE，才允许私有内容；证据缺失时继续执行公开策略。PRIVATE 仓仍检查声明、schema、fixture、路径和提交身份。直接运行 `pii_guard.py --tree --history` 或 `data_boundary.py` 始终采用公开策略。伴生仓准入、证据有效期和传输要求见 [COMPANION.md](COMPANION.md#verifying-a-companion)。
+用 Git LFS 的仓库必须在 `.githooks/` 的转发脚本里自己调 LFS 的钩子（pre-push 里在 `exec` 之前加 `git lfs pre-push "$@"`，另加对应的 post-checkout、post-commit、post-merge 转发脚本），因为 `core.hooksPath=.githooks` 替换掉了 `git lfs install` 放钩子的那个目录。
+
+每个仓库保留自己的 `.pii-allow` 和 `.dataclass.json`：哪些发现可豁免、哪些路径是 TOOL、FIXTURE 或 DATA，是关于那个仓库的事实。
+
+## 实际跑什么
+
+`hooks/pre-commit` 承载两个阶段的逻辑，`hooks/pre-push` 只是带 `--phase pre-push` 重新执行它。
+
+- **提交：** 先对照 `~/.pii-guard/identities.conf` 断言提交身份，再跑 `publication_guard.py pre-commit`，它执行 `pii_guard.py --staged`（只扫这次要提交的内容）和 `data_boundary.py`。
+- **推送：** `publication_guard.py pre-push`，执行 `pii_guard.py --tree --history` 和 `data_boundary.py`。只删除 ref 的推送不发布任何内容，直接跳过。
+
+两者都直接调用 `python`，解释器缺失或不可用时返回非零，即被拦下。
+
+[发布策略](docs/PUBLICATION_POLICY.md)决定范围：只有当前证据证明全部物理及生效 fetch/push 目标均为 PRIVATE，才允许私有内容；证据缺失时继续执行公开策略。PRIVATE 仓仍检查声明、schema、fixture、路径和提交身份。直接运行 `pii_guard.py --tree --history` 或 `data_boundary.py` 始终采用公开策略。伴生仓准入、证据有效期和传输要求见 [COMPANION.md](COMPANION.md#verifying-a-companion)。
 
 ## 里面有什么
 
 | 路径 | 是什么 |
 | --- | --- |
-| `tools/pii_guard.py` | 扫描器。基于白名单，结构化，跑工作树也跑完整历史。 |
+| `tools/pii_guard.py` | 扫描器。基于白名单，结构化，可以扫暂存区、工作树或完整历史。 |
 | `tools/data_boundary.py` | 检查路径分类、fixture 和真实产出边界。 |
-| `tools/publication_guard.py` | 根据已证明的仓库可见性选择常规钩子和 CI 策略。 |
+| `tools/publication_guard.py` | 根据已证明的仓库可见性选择提交和推送策略。 |
 | `tools/datadir.py` | 解析器。决定真实运行产出往哪写，而答案永远在仓库之外。 |
-| `tools/fleet_sync.py` | 分发已验证的上游更新，并推进各消费仓的 gitlink。 |
+| `tools/storage_contract.py` | 校验伴生仓的 `storage.contract.json` 和路径归属。 |
+| `fleet_guards/` | 安装的 Python 包；`fleet_guards.runtime` 暴露解析器和存储契约。 |
 | `hooks/` | `pre-commit`（两个阶段）与 `pre-push`（重新执行前者），消费仓的转发脚本最终 exec 进来的本体。 |
-| `ci/pii-guard/action.yml` | 每个消费仓按本地路径引用的 composite action。 |
-| `templates/fleet-sync.yml` | 消费仓为接入自动同步而拷走的那一个 workflow。 |
-| `templates/upstream-notify.yml` | 自定义上游（包括私有仓）拷走、用来通知自己那批消费仓的 workflow。 |
+| `.githooks/` | 本仓自己的接入转发脚本。 |
 | `COMPANION.md` | 公开仓与私有伴生仓之间的契约。 |
-| `docs/AUTOMATIC_SYNC.md` | 消费仓怎么接入，以及分发路径为什么长这样。 |
-
-## 怎么更新一个消费仓
-
-    git submodule update --remote guards
-    git add guards && git commit -m "guards: bump"
-
-一个 submodule 钉住一个 commit。消费仓可以用上面的命令手工更新，也可以接入[自动同步](docs/AUTOMATIC_SYNC.md)。接入之后，上游检查通过就会发出一个 dispatch 事件，消费仓在自己的默认分支上记录一次普通的 gitlink 更新提交。它自己的提交闸门和 CI 照常运行。同一条路径也能跟随别的仓库，私有仓也行，按声明的分支和检查 workflow 来；但私有上游只能放进私有消费仓，公开消费仓会把它的名字暴露出去。见[私有或自定义上游](docs/AUTOMATIC_SYNC.md#private-or-custom-upstreams)。
 
 ## 输出示例
 
@@ -121,32 +122,13 @@ data_boundary: clean (0 DATA + 0 sealed paths not tracked, 0 FIXTUREs generator-
 
 报告列出实际检查和排除数量，用于判断覆盖范围；空扫描或未完成扫描不能作为通过证据。
 
-## 必须知道的那个失效形态
-
-不带 `--recursive` 的普通 `git clone` 会留下一个空的 `guards/`。不设 `submodules: true` 的 CI checkout
-同理。钩子对缺失的扫描器是 fail closed 的，所以这种状态会大声拦住提交，而不是静默放行，这也是整套安排
-唯一安全的理由。任何时候看到 guards 目录是空的，答案都是 `git submodule update --init`，永远不是
-`--no-verify`。
-
 ## 在 Windows 上起进程
 
-套件起的每一个进程都经过 `_no_window()`。没有控制台的进程（`pythonw`、计划任务、服务）启动控制台程序时，Windows 会弹出一个窗口。这个辅助函数只在调用方没有控制台时才加 `CREATE_NO_WINDOW`，所以钩子未重定向的输出不会被藏起来；它拒绝 `DETACHED_PROCESS` 和 `CREATE_NEW_CONSOLE`。每个工具文件各带一份副本，因为消费仓是按路径一个文件一个文件加载的。
+套件起的每一个进程都经过 `_no_window()`。没有控制台的进程（`pythonw`、计划任务、服务）启动控制台程序时，Windows 会弹出一个窗口。这个辅助函数只在调用方没有控制台时才加 `CREATE_NO_WINDOW`，所以钩子未重定向的输出不会被藏起来；它拒绝 `DETACHED_PROCESS` 和 `CREATE_NEW_CONSOLE`。每个工具文件各带一份副本，因为这些工具是按路径一个文件一个文件加载的。
 
 ## 局限
 
-以下兼容性结论来自一个消费仓的检查，不能代表所有消费方配置。
-
-pre-commit 框架会拒绝安装：`pre-commit install` 打印 "Cowardly refusing to install hooks with
-`core.hooksPath` set"，并建议你去掉那个设置。照它说的做，你会得到一个能用的格式化器和零闸门。
-`.githooks/` 里的转发脚本会在配置和二进制都在时自己去调 `pre-commit run`，所以两者都跑，而闸门排在最
-后：一个会重写文件的格式化器没法把改动绕过扫描。
-
-该次检查通过了 ruff 默认规则；更严格的配置报告了 155 条把 %-格式化改成 f-string 的建议。消费仓使用自己的 lint 策略时，可用 `extend-exclude = ["guards", "style"]` 排除子模块。
-
-你自己那个同名模块会赢。当仓库自己的目录排在 `sys.path` 前面时，`import datadir` 解析到的是仓库自己那
-份，不是套件这份。反过来只会在你把套件路径排到前面时发生，那是一个选择，不是默认。
-
-套件不带测试，消费仓的 `pytest` 不会从 `guards/` 收集到任何东西。
+pre-commit 框架会拒绝安装：`pre-commit install` 打印 "Cowardly refusing to install hooks with `core.hooksPath` set"，并建议你去掉那个设置。照它说的做，你会得到一个能用的格式化器和零闸门。改为在 `.githooks/pre-commit` 转发脚本的 `exec` 之前调 `pre-commit run`，这样会重写文件的格式化器没法把改动绕过扫描。
 
 **散文中的私有事实仍是缺口。** DATA 不在公开源码中，可以避免把这些文件误带进产物。结构规则识别标识符，私有词表识别已配置名称，但它们不能证明一段文字没有泄露私事。公开示例必须使用合成数据。
 
@@ -157,6 +139,3 @@ English (`README.md`) · 中文 (`README_CN.md`)
 ## Roadmap · Contributing · License
 
 见 [ROADMAP.md](ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) · [COMPANION.md](COMPANION.md)。
-
-与本仓规范之间的每一处偏离及其理由，记录在
-[docs/2026-09-22-spec-adaptation.md](docs/2026-09-22-spec-adaptation.md)。

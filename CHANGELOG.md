@@ -6,6 +6,33 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Removed
 
+- **No submodule, no CI, no automatic sync.** The kit now runs only from one
+  local checkout per machine, named by the global git config key `fleet.guards`;
+  consumers opt in with `.githooks/` shims that read that key and block when it
+  is unset. Deleted: `ci/pii-guard/action.yml`, every workflow under
+  `.github/workflows/` (the kit's own gate and the three fleet-sync workflows),
+  `tools/fleet_sync.py`, `docs/AUTOMATIC_SYNC.md`, `templates/`, `setup.py`, the
+  wheel's `_canonical` package mapping and `docs/2026-09-22-spec-adaptation.md`.
+  `publication_guard.py` loses its `ci` phase and the GitHub API visibility
+  client it used; `prove_private_companion` loses its `visibility_map` argument.
+- **Commit scans staged changes only.** The pre-commit phase runs
+  `pii_guard.py --staged` instead of `--tree --staged`; pre-push still runs
+  `--tree --history`.
+- **No inferred source root.** Every `tools/datadir.py` entry point requires
+  `source_root`, and the CLI requires `--source-root`. The walk that found the
+  consumer above a `guards/` submodule is gone.
+
+### Added (2026-10-15)
+
+- `fleet_guards.runtime.storage_contract()` returns the canonical
+  `tools/storage_contract.py` module. `fleet_guards.runtime` loads both tools
+  from the editable checkout and raises `ImportError` naming
+  `pip install -e "$(git config --get fleet.guards)"` when they are missing.
+- `.githooks/pre-commit` and `.githooks/pre-push` in this repository, with
+  `core.hooksPath=.githooks`, so the kit checks its own commits.
+
+### Removed (earlier)
+
 - **No semantic layer in `hooks/pre-push`.** The block that called an optional
   machine-local semantic gate after the structural scan, including its baseline
   subtraction for rewritten histories, is gone. It was advisory by design and

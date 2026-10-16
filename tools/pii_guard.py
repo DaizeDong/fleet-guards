@@ -42,7 +42,7 @@ OPTIONAL PRIVATE LAYER (rebuilt 2026-08-20; see THE POLICY LAYER below for the f
 ----------------------
 If `~/.pii-denylist.json` exists it is read at runtime for extra literals (the operator's own real
 tokens). It never lives in any repo. Absent -> skipped and SAID OUT LOUD, structural checks still
-run everywhere (CI, contributors, other machines).
+run everywhere (contributors, other machines).
 
 That layer used to be a flat list of strings with one punishment, and it had two faults that were
 not bugs but consequences of the shape:
@@ -765,7 +765,7 @@ def _parse_denylist(path, notes=None):
             # Refuse rather than silently treat everything as secret: this copy is older than the policy.
             raise PolicyError(
                 "%s declares format %r but this pii_guard understands up to %d.\n"
-                "  This copy is older than the policy file. Advance the guards submodule."
+                "  This copy is older than the policy file. Update the checkout named by git config fleet.guards."
                 % (path, fmt, POLICY_FORMAT_SUPPORTED))
         if "tokens" not in data:
             raise PolicyError(
@@ -911,17 +911,17 @@ def _load_visibility(vis_path=None, notes=None):
     """(public_names_by_owner, private_keys) from the visibility cache, or None if absent.
 
     Returning None for "absent" and RAISING for "present but unreadable" is the whole point.
-    Absent is ordinary: CI has no cache, a contributor's clone has no cache, and the layer is
+    Absent is ordinary: a contributor's clone has no cache, another machine has no cache, and the layer is
     documented as operator-only. Unreadable is damage, and the old code answered damage with
     an empty map -- which reads exactly like "you have no private repos".
     """
     path = vis_path or os.path.expanduser("~/.pii-guard/visibility.json")
     if not _optional_policy_exists(path):
-        # Absent is ORDINARY (CI, a contributor, a fresh machine) and it is also INVISIBLE unless
+        # Absent is ORDINARY (a contributor, a fresh machine) and it is also INVISIBLE unless
         # somebody says it. Without this note the cross-repo layer can be entirely missing -- a
         # failed refresh, a new machine, a repo not yet registered -- and the run still prints
         # `clean`, which is the exact ambiguity between "checked" and "not checked" that this
-        # whole codebase exists to remove. It is a note, not an error: on a runner it is correct.
+        # whole codebase exists to remove. It is a note, not an error: on another machine it is correct.
         if notes is not None:
             notes.append("pii_guard: NOTE no visibility map at %s -- the cross-repo layer "
                          "contributed nothing to this run." % path)
@@ -2181,13 +2181,13 @@ def main():
 
 def cli():
     """main() with the git-failure exit. Separate exit code so a caller can tell 'this repo has a
-    leak' (1) from 'this scan never ran' (2). Every hook and the CI workflow treat any nonzero as a
+    leak' (1) from 'this scan never ran' (2). Every hook treats any nonzero as a
     block, which is the right default: an unexamined tree is not a clean tree."""
     try:
         return main()
     except PolicyError as e:
         # Exit 2, the same code as an unusable git, and for the same reason: the scan did not
-        # really happen. The private layer is the half of this guard that no CI run can
+        # really happen. The private layer is the half of this guard that no other machine can
         # reconstruct, so a damaged one is not a degraded scan, it is an absent one.
         print("pii_guard: POLICY UNUSABLE -- the private layer could not be trusted, so this\n"
               "  result is NOT a clean bill of health.\n  %s"

@@ -402,7 +402,7 @@ def check_data_absent_from_worktree(root, m, out):
     """Declared DATA must be absent, including ignored files and sealed directories.
 
     Inspect names only. Literal prefixes prune unrelated trees without exempting directory
-    names such as guards/ or .venv/. Never follow a link into a possible data store.
+    names such as .venv/. Never follow a link into a possible data store.
     """
     pats = [p.rstrip("/") for p in m.get("data", []) + m.get("data_sealed", [])]
     if not pats:
@@ -804,12 +804,12 @@ def _companion_git_context(destination):
     return root, physical, effective
 
 
-def _companion_visibility(root, visibility_map, git_context=None):
+def _companion_visibility(root, git_context=None):
     """Require both physical and effective destinations to have fresh PRIVATE receipts."""
     root, physical, effective = git_context or _companion_git_context(root)
     proven = set()
     for environment in (physical, effective):
-        destinations, errors = _companion_visibility_once(root, visibility_map, environment)
+        destinations, errors = _companion_visibility_once(root, environment)
         if errors:
             return [], errors
         proven.update(destinations)
@@ -843,17 +843,17 @@ def _private_signature(context, configurations):
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def prove_private_companion(destination, visibility_map=None):
+def prove_private_companion(destination):
     """Prove current PRIVATE publication routes without scanning or modifying DATA.
 
     Reads local Git configuration only; it never invokes SSH, a remote helper, or a network
-    operation. Used by the commit-time publication guard and fleet_sync, not at write time.
+    operation. Used by the commit-time publication guard, not at write time.
     """
     from types import MappingProxyType
 
     context = _companion_git_context(destination)
     before = _private_configurations(context)
-    repositories, errors = _companion_visibility(context[0], visibility_map, context)
+    repositories, errors = _companion_visibility(context[0], context)
     if errors:
         raise GitError("PRIVATE companion proof failed: " + "; ".join(errors))
     if before != _private_configurations(context):
@@ -1078,7 +1078,7 @@ def _https_configuration_problem(config_entries, env):
     return None
 
 
-def _companion_visibility_once(root, visibility_map, env):
+def _companion_visibility_once(root, env):
     """Require fresh PRIVATE evidence for every effective fetch and push destination.
 
     Reuse pii_guard's visibility receipt format and maximum age. Git expands insteadOf and
@@ -1090,7 +1090,7 @@ def _companion_visibility_once(root, visibility_map, env):
         spec = importlib.util.spec_from_file_location("_boundary_visibility", path)
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
-        visibility = guard._load_visibility(visibility_map)
+        visibility = guard._load_visibility()
     except (OSError, ValueError, RuntimeError, ImportError, AttributeError):
         return [], ["companion visibility receipt could not be verified"]
     if visibility is None:
