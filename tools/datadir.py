@@ -16,7 +16,7 @@ point at the public repo in the first place.
 
 Discovery order (first existing wins):
   1. $<SKILL>_DATA_DIR                       explicit override / hot-swap
-  2. $<SKILL>_CONFIG / $<SKILL>_CONFIG_DIR   the PRIVATE COMPANION REPO, wherever it is pinned:
+  2. $<SKILL>_CONFIG                         the PRIVATE COMPANION REPO, wherever it is pinned:
                                              <config>/data/ when that exists, else <config> itself
   3. <sibling>/data/, then <sibling>         the convention: the companion repo beside this one,
                                              named <skill>-config, proven by its remote or marker
@@ -51,8 +51,8 @@ condemns the correct shape: a private repo is exactly where a person's real data
 WHY THIS FILE DOES NOT CHECK VISIBILITY ITSELF
 ----------------------------------------------
 The tempting next step is to have this function refuse a data dir that sits in a PUBLIC repo. It
-cannot do that honestly. This file ships in every public skill repo, is stdlib-only by
-contract, and has to work on a fresh clone on a stranger's machine: no ~/.pii-guard/visibility.json,
+cannot do that honestly. This file is loaded by every consumer through fleet_guards.runtime, is
+stdlib-only by contract, and must work on a fresh machine: no ~/.pii-guard/visibility.json,
 no `gh`, possibly no network. Fail-closed there bricks every fresh clone on a question that has no
 local answer; fail-open makes the assertion decorative precisely where it matters. So the visibility
 predicate stays OUT OF BAND, in the fleet checker that does have the map.
@@ -95,7 +95,7 @@ def _env_var(skill):
 
 def _config_env_vars(skill):
     stem = skill.upper().replace("-", "_")
-    return (stem + "_CONFIG", stem + "_CONFIG_DIR")
+    return (stem + "_CONFIG",)
 
 
 def _source_root(source_root):
@@ -137,8 +137,8 @@ def assert_outside_own_repo(p, skill, *, source_root):
     losing it produced 83 failures and 17 errors in a skill that runs daily, with a message
     ("module has no attribute") that names the symbol and not the reason.
 
-    So it stays, and the test below is why: a refactor is free to rename the private helper, and
-    is not free to remove this name. It is the only thing standing between a writer and its own
+    So it stays: a refactor is free to rename the private helper and is not free to remove this
+    name; daily-hotspots, demand-mining and email-monitor call it before every write. It is the only thing standing between a writer and its own
     public repo, and its entire value is that callers can reach it.
     """
     return _reject_if_inside_own_repo(p, skill, source_root=source_root)
@@ -444,53 +444,3 @@ def data_path(skill, relpath, create=False, *, source_root):
     if create:
         p.parent.mkdir(parents=True, exist_ok=True)
     return p
-
-
-def _cli(argv=None):
-    """`python tools/datadir.py --source-root <repo> --path <skill> [relpath]` -> print it, or fail.
-
-    Runbooks and shell steps need the path too, and the alternative is that someone hardcodes
-    `metrics/foo.jsonl` into a doc because it was the only thing they could type -- which is how
-    the docs ended up instructing agents to write real-run output into the public repo in the
-    first place. Exit 3 (not 1) when uninitialized, so a script can tell "no data yet" apart from
-    a real error.
-    """
-    import argparse
-    import sys
-
-    ap = argparse.ArgumentParser(description="Resolve a skill's private data path.")
-    ap.add_argument("--source-root", required=True,
-                    help="absolute root of the consumer repository the data belongs to")
-    ap.add_argument("--path", action="store_true", help="print the resolved path")
-    ap.add_argument("--create", action="store_true", help="create an absent explicit DATA/CONFIG destination")
-    ap.add_argument("skill")
-    ap.add_argument("relpath", nargs="?", default="")
-    a = ap.parse_args(argv)
-
-    try:
-        root = os.path.abspath(a.source_root)
-        p = data_path(a.skill, a.relpath, create=a.create, source_root=root) if a.relpath \
-            else (resolve_data_dir(a.skill, create=a.create, source_root=root) or _raise(a.skill))
-    except DataDirNotInitialized as e:
-        print(str(e), file=sys.stderr)
-        return 3
-    except DataDirInsideOwnRepo as e:
-        # Exit 4, distinct from 3. "No data yet" is a state a caller may proceed through; "the data
-        # dir points into the tool repo" is a defect a caller must stop on.
-        print(str(e), file=sys.stderr)
-        return 4
-    print(p)
-    return 0
-
-
-def _raise(skill):
-    raise DataDirNotInitialized(
-        "%s has no private data directory.\n"
-        "    create a PRIVATE repository with an origin and clone it beside this one as %s-config\n"
-        "    or set %s to the private companion repo\n    (or set %s)"
-        % (skill, skill, _config_env_vars(skill)[0], _env_var(skill)))
-
-
-if __name__ == "__main__":
-    import sys
-    sys.exit(_cli())

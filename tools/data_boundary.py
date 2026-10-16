@@ -1155,7 +1155,7 @@ def _companion_visibility_once(root, env):
     return sorted(proven), sorted(set(errors))
 
 
-def check_run_shape_probes(root, m, out, phase_blocking=False):
+def check_run_shape_probes(root, m, out):
     """Has the shape list ever been held against THIS repo's real output?
 
     Check 4 objects only to what it RECOGNISES, so a shape list that recognises nothing produces
@@ -1184,18 +1184,9 @@ def check_run_shape_probes(root, m, out, phase_blocking=False):
     writes nothing of the kind. Nothing mechanical closes that, which is why the list is reviewed
     the way a .pii-allow entry is reviewed, in the diff, by a person. What it does remove is the
     silent case, where nobody had to decide anything at all.
-
-    `phase_blocking` stays False until a repo's list is filled; the flip condition is list
-    non-empty and every probe matching.
     """
     probes = m.get("_run_shape_probes")
     if probes is None or not [p for p in probes if str(p).strip()]:
-        if phase_blocking:
-            out.append(("NOT-CALIBRATED", MANIFEST,
-                        "\"_run_shape_probes\" is empty, so nobody has ever held the run-shape list "
-                        "against what this skill actually writes. Build it with "
-                        "`data_boundary.py --explain <names from a real run>` and commit the "
-                        "SCHEMATIC forms."))
         return "uncalibrated"
     missed = []
     for p in probes:
@@ -1391,7 +1382,7 @@ def main(private_proof=None):
         check_empty_data_is_audited(root, m, out)
         # Check 6, PHASE 1: a probe that misses is a violation now, an EMPTY probe list is reported
         # and does not block. See check_run_shape_probes for why the flip is per repo and later.
-        calib = check_run_shape_probes(root, m, out, phase_blocking=False)
+        calib = check_run_shape_probes(root, m, out)
 
     if not out and manifest_absent:
         print("data_boundary: NOT ARMED. There is no %s in %s, so checks 1, 2, 3 and 5 asserted\n"

@@ -40,8 +40,6 @@ def relative_path(value, *, pattern=False):
     return value
 
 
-_relative_path = relative_path
-
 
 def validate_contract(repo):
     path = no_links(Path(repo) / CONTRACT)

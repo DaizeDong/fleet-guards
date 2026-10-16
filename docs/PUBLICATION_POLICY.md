@@ -36,7 +36,7 @@ index remain in effect for scans of the repository being checked.
 
 ## Private token policies and companion identity
 
-Format-2 private token policies require an integer `count` matching all loaded entries, including the canary. Legacy policies remain readable and report that completeness is unattested. The DATA resolver follows the physical installation when imported through a directory alias and refuses authorization if filesystem resolution fails. Visibility is proven by the publication guard when the companion commits or pushes.
+The private token policy must be format 2: an integer `count` matching all loaded entries, including the canary, and every token an object with `value` and `kind`. Any other shape is refused. The DATA resolver follows the physical installation when imported through a directory alias and refuses authorization if filesystem resolution fails. Visibility is proven by the publication guard when the companion commits or pushes.
 
 Eligible historical blobs above the 8 MiB scan limit make the history scan incomplete. The API raises `ScanIncompleteError`; the CLI prints `SCAN INCOMPLETE` and exits 2, which blocks publication. A size limit cannot establish that the skipped content is safe. Existing exclusions for known binary extensions remain separate.
 

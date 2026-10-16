@@ -29,7 +29,7 @@ directory. Discovery proves the companion identity described below; PRIVATE publ
 | Order | Location | Notes |
 |---|---|---|
 | 1 | `$<SKILL>_DATA_DIR` | the data directory itself, not a repo root |
-| 2 | `$<SKILL>_CONFIG/data`, then `$<SKILL>_CONFIG` | also `$<SKILL>_CONFIG_DIR` |
+| 2 | `$<SKILL>_CONFIG/data`, then `$<SKILL>_CONFIG` | the companion repo root |
 | 3 | `<sibling>/data`, then `<sibling>` | **the convention**: a directory named `<skill>-config` beside this repository |
 
 There is no home-directory location. `~/.<skill>-config` and `~/.<skill>-data` were probed until

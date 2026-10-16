@@ -14,6 +14,16 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ### Removed
 
+- Compatibility and unused surface: the `support-egress-v1` credential policy (canary and
+  entropy checks) and its `entropy_threshold` keyword; the `python -m fleet_guards` CLI and
+  the `fleet-guards` console script; `assert_same_volume`/`CrossVolumeError`; the private
+  `_sync_directory` alias (the function is now `sync_directory`); the unused `ScanResult`
+  type; legacy v1 denylists and bare-string exemptions in `pii_guard.py`; the
+  `PII_DENYLIST` override, the `vis_path` test parameter, `Policy.of`, the `strict=`
+  keyword of `scan_text` and the unused `DOMAINS`; the `datadir.py` CLI; the
+  `<SKILL>_CONFIG_DIR` alias (only `<SKILL>_CONFIG` names a companion);
+  `storage_contract._relative_path`; and the never-flipped `phase_blocking` branch of
+  `data_boundary.check_run_shape_probes`.
 - `pii_guard.py --range` and `scan_range()`: only the retired machine-level push
   scan used them. Commit runs `--staged`, push runs `--tree --history`.
 - `fleet_guards.filesystem.exclude_file_writes` and `delete_if_identity_matches`,

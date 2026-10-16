@@ -9,12 +9,6 @@ class Finding(TypedDict):
     confidence: float
 
 
-class ScanResult(TypedDict):
-    state: Literal["clean", "findings", "scan_failed"]
-    policy_version: str | None
-    findings: list[Finding]
-
-
 def finding(rule_id: str, span: tuple[int, int], confidence: float = 0.99) -> Finding:
     return {"rule_id": rule_id, "span": list(span), "severity": "block", "confidence": confidence}
 

@@ -11,9 +11,6 @@ license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = []
 
-[project.scripts]
-fleet-guards = "fleet_guards.__main__:main"
-
 [tool.setuptools]
 packages = ["fleet_guards", "fleet_guards._tools"]
 

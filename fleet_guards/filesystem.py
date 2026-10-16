@@ -14,33 +14,6 @@ import stat
 import tempfile
 
 
-class CrossVolumeError(RuntimeError):
-    pass
-
-
-def _same_volume(a: str, b: str) -> bool:
-    """True if paths a and b live on the same device/volume."""
-    da = os.path.dirname(os.path.abspath(a)) or "."
-    db = os.path.dirname(os.path.abspath(b)) or "."
-    # Walk up to an existing ancestor (dest dir may not exist yet in dry tests).
-    while not os.path.exists(da) and os.path.dirname(da) != da:
-        da = os.path.dirname(da)
-    while not os.path.exists(db) and os.path.dirname(db) != db:
-        db = os.path.dirname(db)
-    try:
-        return os.stat(da).st_dev == os.stat(db).st_dev
-    except OSError:
-        return False
-
-
-def assert_same_volume(tmp_path: str, dest_path: str) -> None:
-    if not _same_volume(tmp_path, dest_path):
-        raise CrossVolumeError(
-            "refusing non-atomic cross-volume rename: %s -> %s" % (tmp_path, dest_path)
-        )
-
-
-
 class UnsafePathError(ValueError):
     """A path has unsafe syntax, reparse components or an unexpected file type."""
 
@@ -92,7 +65,7 @@ def _regular_or_missing(path):
     return info
 
 
-def _sync_directory(parent):
+def sync_directory(parent):
     if os.name == "nt":
         return
     fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -149,7 +122,7 @@ def atomic_replace(path, data, mode: int = 0o600) -> None:
     _regular_or_missing(path)
     with _staged(path, data, mode) as temp:
         os.replace(temp, path)
-        _sync_directory(path.parent)
+        sync_directory(path.parent)
 
 
 def create_no_replace(path, data, mode: int = 0o600) -> bool:
@@ -188,7 +161,7 @@ def create_no_replace_with_identity(path, data, mode: int = 0o600):
                     os.link(temp, path)
         except FileExistsError:
             return None
-        _sync_directory(path.parent)
+        sync_directory(path.parent)
         return opened
 
 
@@ -257,10 +230,6 @@ def _stat_identity(info):
     if info.st_ino == 0:
         raise OSError('unavailable_curation_file_identity')
     return [info.st_dev, info.st_ino]
-
-
-# The public name shares the same directory durability implementation.
-sync_directory = _sync_directory
 
 
 def link_no_replace(source, destination):

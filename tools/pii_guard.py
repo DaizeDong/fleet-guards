@@ -167,10 +167,9 @@ EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z
 # or parens) to keep the false-positive rate survivable.
 PHONE_RE = re.compile(r"(?<![\w.\-])(?:\+?1[\s.\-])?\(?([2-9]\d{2})\)?[\s.\-]([2-9]\d{2})[\s.\-](\d{4})(?![\w.\-])")
 # A hyphen-only triple is ALSO how machine learning code writes a shape. `conv kernel 512-256-1024`
-# matches the NANP pattern exactly: area 2-9, exchange 2-9, four digits. This machine's pre-commit
-# hook runs in EVERY repo on it, including a dozen forks of training frameworks, so that false
-# positive is not hypothetical -- it is a blocked commit in somebody else's project, which is the
-# precise event that ends with --no-verify and a gate that guards nothing anywhere.
+# matches the NANP pattern exactly: area 2-9, exchange 2-9, four digits. That false positive is a
+# blocked commit on ordinary code, which is the precise event that ends with --no-verify and a gate
+# that guards nothing anywhere.
 #
 # So the hyphen-only form yields when a dimension word is nearby. Every other form is untouched:
 # parentheses, a +1 prefix, dots or spaces as separators are all shapes a tensor shape never takes,
@@ -473,13 +472,7 @@ MATCHER_PROBE_ALPHA = "zzmatcherprobealpha"
 # The documented naming conventions for a private companion of a public repo. Adding a suffix
 # here widens what counts as derivable, so it is a deliberate, reviewable act.
 CONVENTION_SUFFIXES = ("-config", "-data", "-private", "-secrets")
-DOMAINS = ("tree", "staged", "history")
 
-
-_UNATTESTED_NOTE = (
-    "pii_guard: WARNING %s is in the legacy format: no canary and no count, so this run CANNOT\n"
-    "  tell a complete policy from a half-deleted one. Deleting entries from a JSON array leaves\n"
-    "  valid JSON and the survivors keep working. Upgrade it with migrate_denylist.py.")
 
 
 class PolicyError(RuntimeError):
@@ -631,20 +624,6 @@ class Policy(object):
         self._pf_key, self._pf = key, pats
         return pats
 
-    @classmethod
-    def of(cls, tokens, kind=DEFAULT_KIND):
-        """Build a Policy from a bare iterable of strings or Tokens.
-
-        Exists so that a caller holding a plain list (a test, a one-off script) does not have to
-        construct the whole loader. Everything it produces defaults to `secret`, which is the
-        conservative reading of "somebody handed me a string and did not say what it was".
-        """
-        p = cls()
-        for t in tokens or ():
-            p.tokens.append(t if isinstance(t, Token) else Token(str(t).lower(), kind))
-        p.denylist_present = bool(p.tokens)
-        return p
-
     def grant_for(self, token_value, domain):
         for g in self.grants:
             if g.token != token_value:
@@ -734,64 +713,47 @@ def load_repo_allow(root):
 
 def _denylist_path():
     """Where the private token file lives. Never inside a repo; see load_policy."""
-    p = os.environ.get("PII_DENYLIST")
-    if p:
-        return p
     return os.path.expanduser("~/.pii-denylist.json")
 
 
-def _parse_denylist(path, notes=None):
-    """Read the private token file into Tokens, or raise. Accepts v1 and v2 encodings.
+def _parse_denylist(path):
+    """Read the private token file into Tokens, or raise. Only format 2 is accepted:
 
-    v1 (legacy):  ["tok", ...]                     or  {"tokens": ["tok", ...]}
-    v2:           {"format": 2, "count": N, "canary": "...",
-                   "tokens": [{"value": "...", "kind": "secret|linkage|derived"}]}
+        {"format": 2, "count": N, "canary": "...",
+         "tokens": [{"value": "...", "kind": "secret|linkage|derived"}]}
 
-    WHY THE v2 FILE CARRIES A CANARY AND A COUNT
-    The v1 encoding cannot tell a healthy file from a damaged one. Delete half the array and
+    WHY THE FILE CARRIES A CANARY AND A COUNT
+    A bare token array cannot tell a healthy file from a damaged one. Delete half the array and
     what remains is still valid JSON, the surviving tokens still work, and nothing anywhere
     says a word. The canary answers "did I load THE file" and the count answers "did I load
     ALL of it". A check whose failure mode is silent agreement has to prove it can disagree.
     """
     data = _read_json(path)
 
-    if isinstance(data, list):                       # bare v1 list
-        raw, fmt, declared_count, canary = data, 1, None, None
-        if notes is not None:
-            notes.append(_UNATTESTED_NOTE % path)
-    elif isinstance(data, dict):
-        fmt = data.get("format", 1)
-        if type(fmt) is not int or not 1 <= fmt <= POLICY_FORMAT_SUPPORTED:
-            # Refuse rather than silently treat everything as secret: this copy is older than the policy.
-            raise PolicyError(
-                "%s declares format %r but this pii_guard understands up to %d.\n"
-                "  This copy is older than the policy file. Update the checkout named by git config fleet.guards."
-                % (path, fmt, POLICY_FORMAT_SUPPORTED))
-        if "tokens" not in data:
-            raise PolicyError(
-                "%s has no `tokens` key (found: %s).\n"
-                "  The old loader read that as an empty denylist and printed a clean result."
-                % (path, ", ".join(sorted(k for k in data)) or "nothing"))
-        raw = data.get("tokens")
-        declared_count = data.get("count")
-        if fmt >= 2 and type(declared_count) is not int:
-            raise PolicyError("%s: format %d requires an integer `count` to attest completeness"
-                              % (path, fmt))
-        canary = data.get("canary") or (CANARY_TOKEN if fmt >= 2 else None)
-        if notes is not None and canary is None and declared_count is None:
-            notes.append(_UNATTESTED_NOTE % path)
-    else:
-        raise PolicyError("%s must contain a list or an object, found %s"
-                          % (path, type(data).__name__))
+    if not isinstance(data, dict) or data.get("format") != POLICY_FORMAT_SUPPORTED:
+        raise PolicyError(
+            "%s must be format %d {format, count, canary, tokens}; found %s.\n"
+            "  If it declares a newer format, update the checkout named by git config fleet.guards."
+            % (path, POLICY_FORMAT_SUPPORTED,
+               ("format %r" % data.get("format")) if isinstance(data, dict) else type(data).__name__))
+    if "tokens" not in data:
+        raise PolicyError(
+            "%s has no `tokens` key (found: %s).\n"
+            "  The old loader read that as an empty denylist and printed a clean result."
+            % (path, ", ".join(sorted(k for k in data)) or "nothing"))
+    raw = data.get("tokens")
+    declared_count = data.get("count")
+    if type(declared_count) is not int:
+        raise PolicyError("%s: format %d requires an integer `count` to attest completeness"
+                          % (path, POLICY_FORMAT_SUPPORTED))
+    canary = data.get("canary") or CANARY_TOKEN
 
     if not isinstance(raw, list):
         raise PolicyError("%s: `tokens` must be a list, found %s" % (path, type(raw).__name__))
 
     toks = []
     for i, item in enumerate(raw):
-        if isinstance(item, str):
-            value, kind = item, DEFAULT_KIND
-        elif isinstance(item, dict):
+        if isinstance(item, dict):
             value = item.get("value")
             kind = item.get("kind", DEFAULT_KIND)
             if not isinstance(value, str):
@@ -803,7 +765,7 @@ def _parse_denylist(path, notes=None):
                     "  version mismatch, and guessing anything weaker would hide a real token."
                     % (path, i, kind, ", ".join(KINDS)))
         else:
-            raise PolicyError("%s: token %d is a %s, expected a string or an object"
+            raise PolicyError("%s: token %d is a %s, expected an object with value and kind"
                               % (path, i, type(item).__name__))
         value = value.strip().lower()
         if value:
@@ -817,26 +779,22 @@ def _parse_denylist(path, notes=None):
             "  absent is a state the guard reports out loud, empty is one it used to hide."
             % path)
 
-    if canary:
-        if not any(t.value == canary.lower() for t in toks):
-            raise PolicyError(
-                "%s does not contain its own canary %r.\n"
-                "  Either the file was truncated, or a key was renamed, or this is not the file\n"
-                "  you think it is. Any of those silently disables the whole private layer."
-                % (path, canary))
-        # The canary is an ATTESTATION, not policy. Leaving it in the token set would make every
-        # file that legitimately writes it down a finding -- starting with this one, which has to
-        # name it in order to check for it, and which ships in every public repo.
-        toks_after_canary = [t for t in toks if t.value != canary.lower()]
-    else:
-        toks_after_canary = toks
-    if declared_count is not None:
-        if type(declared_count) is not int or declared_count != len(toks):
-            raise PolicyError(
-                "%s declares count=%r but %d tokens loaded.\n"
-                "  Removing entries from a JSON array leaves valid JSON, so this mismatch is the\n"
-                "  only thing standing between a half-deleted policy and a green light."
-                % (path, declared_count, len(toks)))
+    if not any(t.value == canary.lower() for t in toks):
+        raise PolicyError(
+            "%s does not contain its own canary %r.\n"
+            "  Either the file was truncated, or a key was renamed, or this is not the file\n"
+            "  you think it is. Any of those silently disables the whole private layer."
+            % (path, canary))
+    # The canary is an ATTESTATION, not policy. Leaving it in the token set would make every
+    # file that legitimately writes it down a finding -- starting with this one, which has to
+    # name it in order to check for it.
+    toks_after_canary = [t for t in toks if t.value != canary.lower()]
+    if declared_count != len(toks):
+        raise PolicyError(
+            "%s declares count=%r but %d tokens loaded.\n"
+            "  Removing entries from a JSON array leaves valid JSON, so this mismatch is the\n"
+            "  only thing standing between a half-deleted policy and a green light."
+            % (path, declared_count, len(toks)))
     # count is compared against the file's own entries, INCLUDING the canary, because it is a
     # statement about the file. The canary is dropped only after both assertions have run.
     if not toks_after_canary:
@@ -905,9 +863,10 @@ VISIBILITY_STATES = ("PUBLIC", "PRIVATE", "UNKNOWN")
 #          the safe direction here, and it is also what this guard did before derivability existed.
 VIS_STALE_NOTE_S = 24 * 3600
 VIS_MAX_AGE_S = 30 * 24 * 3600
+VIS_PATH = os.path.expanduser("~/.pii-guard/visibility.json")
 
 
-def _load_visibility(vis_path=None, notes=None):
+def _load_visibility(notes=None):
     """(public_names_by_owner, private_keys) from the visibility cache, or None if absent.
 
     Returning None for "absent" and RAISING for "present but unreadable" is the whole point.
@@ -915,7 +874,7 @@ def _load_visibility(vis_path=None, notes=None):
     documented as operator-only. Unreadable is damage, and the old code answered damage with
     an empty map -- which reads exactly like "you have no private repos".
     """
-    path = vis_path or os.path.expanduser("~/.pii-guard/visibility.json")
+    path = VIS_PATH
     if not _optional_policy_exists(path):
         # Absent is ORDINARY (a contributor, a fresh machine) and it is also INVISIBLE unless
         # somebody says it. Without this note the cross-repo layer can be entirely missing -- a
@@ -1007,8 +966,8 @@ def derivation_witness(owner, name, public_by_owner):
     return None
 
 
-def load_cross_repo_tokens(root, vis_path=None, notes=None):
-    loaded = _load_visibility(vis_path, notes)
+def load_cross_repo_tokens(root, notes=None):
+    loaded = _load_visibility(notes)
     if loaded is None:
         return []
     public_by_owner, private, age_s = loaded
@@ -1103,16 +1062,6 @@ def load_grants(root, notes):
         if block_key.strip().lower() != key:
             continue
         for i, e in enumerate(entries or []):
-            if isinstance(e, str):
-                # A bare string, from before this file had a shape. Honoured at the SAFE scope:
-                # the least considered entries must not receive the widest exemption.
-                grants.append(Grant(e.strip().lower(), "history-only", "(legacy entry)"))
-                notes.append(
-                    "pii_guard: WARNING a legacy string exemption in %s is being honoured at "
-                    "scope=history-only with no reason. If it was meant to cover live content it "
-                    "is not doing so any more. Rewrite it as an object with scope and reason."
-                    % path)
-                continue
             if not isinstance(e, dict):
                 notes.append("pii_guard: WARNING exemption %d for %s is a %s, ignored"
                              % (i, block_key, type(e).__name__))
@@ -1153,7 +1102,7 @@ def load_grants(root, notes):
     return grants
 
 
-def load_policy(root=None, vis_path=None):
+def load_policy(root=None):
     """Assemble the whole second layer, and prove it is worth trusting before returning it.
 
     Order matters. The matcher probe runs FIRST, because a broken matcher would make every
@@ -1165,11 +1114,10 @@ def load_policy(root=None, vis_path=None):
     path = _denylist_path()
     if path and _optional_policy_exists(path):
         pol.denylist_present = True
-        pol.tokens.extend(_parse_denylist(path, pol.notes))
+        pol.tokens.extend(_parse_denylist(path))
     if root:
-        cross = load_cross_repo_tokens(root, vis_path, pol.notes)
-        pol.visibility_present = bool(cross) or _optional_policy_exists(
-            vis_path or os.path.expanduser("~/.pii-guard/visibility.json"))
+        cross = load_cross_repo_tokens(root, pol.notes)
+        pol.visibility_present = bool(cross) or _optional_policy_exists(VIS_PATH)
         have = {t.value for t in pol.tokens}
         pol.tokens.extend(t for t in cross if t.value not in have)
         pol.grants = load_grants(root, pol.notes)
@@ -1275,7 +1223,7 @@ def _path_mailbox(addr, allow):
     return addr
 
 
-def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, strict=None,
+def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False,
               path_text=False):
     """Append findings for one chunk of text.
 
@@ -1290,11 +1238,6 @@ def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False, stri
     blending in. Applied retroactively to years of history it lights up on harmless old
     fixtures, the hook goes permanently red, and a permanently red hook is a bypassed hook.
     """
-    if not isinstance(pol, Policy):
-        pol = Policy.of(pol)
-    if strict is not None:
-        # historical keyword, kept because it names the same distinction from the other side
-        domain = "tree" if strict else "history"
     strict = (domain == "tree")
     low = text.lower()
 
@@ -1838,9 +1781,8 @@ def scan_staged(root, allow, pol):
     forever and everyone who cloned already has it. Every leak in the 2026-07 audit passed through
     this exact point, and there was nothing standing here.
 
-    Breach classes only (strict=False): a consumer mailbox, a real phone, a home ZIP, a private
-    token. Not the full synthetic-namespace rule -- this hook runs in every repo on the machine,
-    including forks and research code, and a gate that nags there is a gate that gets bypassed.
+    Breach classes only (strict=False): commit time checks only what is being added; pre-push
+    runs the full --tree --history scan.
     """
     out = []
     # Object bytes are authoritative even when attributes suppress a Git patch or the working

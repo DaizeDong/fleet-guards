@@ -4,15 +4,13 @@ Only ``state == 'clean'`` can authorize a caller to proceed. This module does
 not redact documents or interpret configuration field ownership. Scan the final
 serialized output too. Offsets are half-open character offsets into the input.
 """
-from collections import Counter
-import math
 import re
 import time
 
 from .findings import failed, finding
 
 
-POLICIES = ("credential-shapes-v1", "support-egress-v1")
+POLICIES = ("credential-shapes-v1",)
 MAX_TEXT_CHARS = 1_000_000
 MAX_FINDINGS = 1000
 SCAN_SECONDS = 1.0
@@ -50,8 +48,6 @@ _ASSIGNMENT = re.compile(r"\b" + _KEY + r"\b[\"']?\s*[:=]\s*" + _ASSIGNMENT_VALU
 _CLI = re.compile(r"--" + _KEY + r"\b(?:=|\s+|[\"']\s*,\s*)" + _VALUE, re.I)
 _QUERY = re.compile(r"[?&](?:key|api_key|token|secret|password)=(?P<value>[^&#\s\"']+)", re.I)
 _BEARER = re.compile(r"\bBearer\s+" + _VALUE, re.I)
-_CANDIDATE = re.compile(r"[A-Za-z0-9+/=_-]{20,}")
-_CANARY = re.compile(r"\b[A-Z0-9_]*CANARY[A-Z0-9_]*\b")
 _API_TEMPLATE = re.compile(r"sk-your-(?:[a-z][a-z0-9]{0,31}-)?(?:api-)?key(?:-here)?")
 _PLACEHOLDER = re.compile(
     r"(?:redacted|example|placeholder|changeme|x{4,}|\*{4,}|"
@@ -63,13 +59,6 @@ _PLACEHOLDER = re.compile(
 
 class _BudgetExceeded(Exception):
     pass
-
-
-def shannon_entropy(text):
-    if not text:
-        return 0.0
-    length = len(text)
-    return -sum((count / length) * math.log2(count / length) for count in Counter(text).values())
 
 
 def _template(value):
@@ -84,9 +73,8 @@ def _complete_api_template(match, text):
     return (start == 0 or text[start - 1] not in token_chars) and (end == len(text) or text[end] not in token_chars)
 
 
-def _scan(text, policy, entropy_threshold, seconds):
+def _scan(text, policy, seconds):
     deadline = time.monotonic() + seconds
-    strict = policy == "support-egress-v1"
     findings = []
 
     def check_budget():
@@ -102,7 +90,7 @@ def _scan(text, policy, entropy_threshold, seconds):
     for name, pattern in _SHAPES:
         check_budget()
         for match in pattern.finditer(text):
-            if not strict and name == "openai_key" and _complete_api_template(match, text):
+            if name == "openai_key" and _complete_api_template(match, text):
                 continue
             add(name, match.span())
 
@@ -118,30 +106,16 @@ def _scan(text, policy, entropy_threshold, seconds):
             value = match.group("value")
             if value[:1] in ("'", '"') and value[-1:] == value[:1]:
                 value = value[1:-1]
-            if len(value) >= minimum and (strict or not _template(value)):
+            if len(value) >= minimum and not _template(value):
                 add(name, match.span())
 
-    if strict:
-        for match in _CANARY.finditer(text):
-            add("canary_secret", match.span())
-        for match in _CANDIDATE.finditer(text):
-            check_budget()
-            start, end = match.span()
-            if any(a < end and start < b for a, b in (f["span"] for f in findings)):
-                continue
-            token = match.group()
-            classes = sum(bool(re.search(p, token)) for p in (r"[a-z]", r"[A-Z]", r"[0-9]"))
-            if len(token) >= 24 and classes >= 2:
-                entropy = shannon_entropy(token)
-                if entropy >= entropy_threshold:
-                    add("high_entropy_token", match.span(), 0.6)
     check_budget()
     findings.sort(key=lambda f: (f["span"][0], f["span"][1], f["rule_id"]))
     check_budget()
     return {"state": "findings" if findings else "clean", "policy_version": policy, "findings": findings}
 
 
-def scan(text: str, policy: str = "credential-shapes-v1", *, entropy_threshold: float = 4.0,
+def scan(text: str, policy: str = "credential-shapes-v1", *,
          max_text_chars: int | None = None, seconds: float | None = None) -> dict:
     """Return metadata only. Unknown policies, incomplete scans and failures fail closed.
 
@@ -155,9 +129,6 @@ def scan(text: str, policy: str = "credential-shapes-v1", *, entropy_threshold: 
         return failed(None, "unknown_policy")
     if not isinstance(text, str):
         return failed(policy, "invalid_text")
-    if (not isinstance(entropy_threshold, (int, float)) or
-            not math.isfinite(entropy_threshold) or entropy_threshold < 0):
-        return failed(policy, "invalid_entropy_threshold")
     max_text_chars = MAX_TEXT_CHARS if max_text_chars is None else max_text_chars
     seconds = SCAN_SECONDS if seconds is None else seconds
     if (type(max_text_chars) is not int or not 0 < max_text_chars <= MAX_SCAN_TEXT_CHARS or
@@ -166,7 +137,7 @@ def scan(text: str, policy: str = "credential-shapes-v1", *, entropy_threshold: 
     if len(text) > max_text_chars:
         return failed(policy, "input_limit")
     try:
-        return _scan(text, policy, entropy_threshold, seconds)
+        return _scan(text, policy, seconds)
     except _BudgetExceeded:
         return failed(policy, "scan_budget")
     except Exception:
