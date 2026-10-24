@@ -4,6 +4,11 @@ All notable changes to this project are documented here (Keep a Changelog style)
 
 ## [Unreleased]
 
+### Added
+
+- `docs/DATA_BOUNDARY.md` states the rules an author of a public repository follows: the data
+  boundary, synthetic identifiers, history rewrites and what no check can close.
+
 ### Changed (0.3.0)
 
 - **Wheels carry the canonical tools.** `tools/` is packaged as `fleet_guards._tools`

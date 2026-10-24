@@ -94,7 +94,8 @@ post-commit and post-merge shims), because `core.hooksPath=.githooks` replaces t
 where `git lfs install` put them.
 
 Each repository keeps its own `.pii-allow` and `.dataclass.json`: which findings are exempt and
-which paths are TOOL, FIXTURE or DATA are facts about that repository.
+which paths are TOOL, FIXTURE or DATA are facts about that repository. The rules an author of a
+public repository follows are in [docs/DATA_BOUNDARY.md](docs/DATA_BOUNDARY.md).
 
 ## What runs
 

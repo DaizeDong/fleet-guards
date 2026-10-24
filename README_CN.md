@@ -82,7 +82,7 @@ exec sh "$G/hooks/pre-commit" "$@"
 
 用 Git LFS 的仓库必须在 `.githooks/` 的转发脚本里自己调 LFS 的钩子（pre-push 里在 `exec` 之前加 `git lfs pre-push "$@"`，另加对应的 post-checkout、post-commit、post-merge 转发脚本），因为 `core.hooksPath=.githooks` 替换掉了 `git lfs install` 放钩子的那个目录。
 
-每个仓库保留自己的 `.pii-allow` 和 `.dataclass.json`：哪些发现可豁免、哪些路径是 TOOL、FIXTURE 或 DATA，是关于那个仓库的事实。
+每个仓库保留自己的 `.pii-allow` 和 `.dataclass.json`：哪些发现可豁免、哪些路径是 TOOL、FIXTURE 或 DATA，是关于那个仓库的事实。公开仓作者要守的规则见 [docs/DATA_BOUNDARY.md](docs/DATA_BOUNDARY.md)。
 
 ## 实际跑什么
 
