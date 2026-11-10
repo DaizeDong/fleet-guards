@@ -1188,6 +1188,11 @@ def scan_text(text, where, allow, pol, out, domain="tree", deny_only=False,
                 structural.append(("EMAIL", addr))              # not in the synthetic namespace
         for m in PHONE_RE.finditer(text):
             area, exch, last = m.group(1), m.group(2), m.group(3)
+            if area is None:
+                # CPython's sre sometimes returns an empty match with no groups for this pattern on large
+                # inputs (seen on 3.11, 3.12 and 3.13; it varies from run to run). The pattern cannot match
+                # empty text, so this is never a phone number and must not block a push.
+                continue
             num = "%s-%s-%s" % (area, exch, last)
             if ALLOWED_PHONE_555 in (area, exch) or num.lower() in allow:
                 continue
