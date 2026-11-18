@@ -1,5 +1,9 @@
 # fleet-guards
 
+<!-- infra:badges:start -->
+![Infra](https://img.shields.io/badge/Infra-yes-teal) ![Layer](https://img.shields.io/badge/Layer-L1%20identity%20gates-red) ![Kind](https://img.shields.io/badge/Kind-guard-informational) ![Residence](https://img.shields.io/badge/Residence-on--demand-lightgrey) ![Autostart](https://img.shields.io/badge/Autostart-none-lightgrey) ![Visibility](https://img.shields.io/badge/Visibility-public-brightgreen)
+<!-- infra:badges:end -->
+
 Git 仓库共用的发布检查套件，提供九条检测规则、数据边界和检查缺失时阻断操作的钩子。每台机器只放一份本地 checkout，消费仓用两个很小的钩子转发脚本接入。
 
 Python 消费方通过[已安装的运行时包](PACKAGE.md)取得伴生仓解析和存储契约。

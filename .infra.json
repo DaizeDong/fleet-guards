@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "layer": 1,
+  "kind": "guard",
+  "residence": "on-demand",
+  "autostart": "none",
+  "selfheal": null,
+  "visibility": "PUBLIC"
+}

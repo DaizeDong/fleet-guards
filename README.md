@@ -1,5 +1,9 @@
 # fleet-guards
 
+<!-- infra:badges:start -->
+![Infra](https://img.shields.io/badge/Infra-yes-teal) ![Layer](https://img.shields.io/badge/Layer-L1%20identity%20gates-red) ![Kind](https://img.shields.io/badge/Kind-guard-informational) ![Residence](https://img.shields.io/badge/Residence-on--demand-lightgrey) ![Autostart](https://img.shields.io/badge/Autostart-none-lightgrey) ![Visibility](https://img.shields.io/badge/Visibility-public-brightgreen)
+<!-- infra:badges:end -->
+
 Shared publication guards for Git repositories: nine detection rules, a data boundary, and hooks that block when required checks are unavailable. The kit runs from one local checkout per machine; consumers opt in with two small hook shims.
 
 Python consumers use the [installed runtime package](PACKAGE.md) for companion discovery and storage contracts.
