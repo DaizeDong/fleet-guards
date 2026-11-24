@@ -529,11 +529,35 @@ def _git_windows_installation(selected):
     return None
 
 
-def _ssh_config_sources():
+def _windows_openssh_command(value):
+    """The Windows OpenSSH client when core.sshCommand names exactly it, else None.
+
+    A key with a passphrase lives in the Windows ssh-agent, which only that client reads, so a
+    machine pins it with core.sshCommand. The client is one this policy already recognizes, so it
+    is not a custom transport, provided the command adds nothing beyond `-o BatchMode=yes`.
+    """
+    import shlex
+    from pathlib import Path
+    windows = os.environ.get("SystemRoot")
+    if os.name != "nt" or not windows or not isinstance(value, str):
+        return None
+    try:
+        argv = shlex.split(value.replace("\\", "/"))
+    except ValueError:
+        return None
+    if not argv or argv[1:] not in ([], ["-o", "BatchMode=yes"], ["-oBatchMode=yes"]):
+        return None
+    expected = Path(windows) / "System32/OpenSSH/ssh.exe"
+    if os.path.normcase(os.path.realpath(argv[0])) != os.path.normcase(os.path.realpath(expected)):
+        return None
+    return str(expected)
+
+
+def _ssh_config_sources(client=None):
     """Conservative scan paths and plausible chains for the selected recognized client."""
     import shutil
     from pathlib import Path
-    client = shutil.which("ssh")
+    client = client or shutil.which("ssh")
     canonical = lambda path: os.path.normcase(os.path.realpath(path))
     profile = _ssh_profile_home()
     if not profile:
@@ -572,7 +596,7 @@ def _ssh_config_sources():
     return {"paths": sorted(paths), "chains": [(name, selected_system) for name in sorted(user_paths)]}
 
 
-def _ssh_configuration_problem(host):
+def _ssh_configuration_problem(host, client=None):
     """Prove a literal SSH host under a deliberately small static OpenSSH policy.
 
     Never invoke ssh -G: evaluating Match exec there can execute configuration commands.
@@ -588,7 +612,7 @@ def _ssh_configuration_problem(host):
     if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", host):
         return "SSH hostname is outside the static policy"
     host = host.casefold()
-    sources = _ssh_config_sources()
+    sources = _ssh_config_sources(client)
     paths = sources["paths"] if sources is not None else None
     chains = None if host == "github.com" else (sources["chains"] if sources is not None else None)
     if paths is None:
@@ -994,9 +1018,11 @@ def _companion_visibility_once(root, env):
     if any(key.startswith("remote.") and key.rsplit(".", 1)[-1] in {"vcs", "uploadpack", "receivepack"}
            for key in config):
         return [], ["companion has a custom remote transport command; visibility is UNKNOWN"]
+    pinned_client = _windows_openssh_command(config.get("core.sshcommand"))
     ssh_override = (any(name.upper() in {"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"}
                         for name in env)
-                    or any(name in config for name in ("core.sshcommand", "ssh.variant")))
+                    or "ssh.variant" in config
+                    or "core.sshcommand" in config and pinned_client is None)
     ssh_checks = {}
     https_check = []
     proven, errors = set(), []
@@ -1017,7 +1043,7 @@ def _companion_visibility_once(root, env):
                     if ssh_host not in ssh_checks:
                         ssh_checks[ssh_host] = ("custom SSH transport override"
                                                 if ssh_override or _git_exec_path_problem(env) is not None
-                                                else _ssh_configuration_problem(ssh_host))
+                                                else _ssh_configuration_problem(ssh_host, pinned_client))
                     if ssh_checks[ssh_host] is not None:
                         errors.append("companion SSH destination is UNKNOWN: " + str(ssh_checks[ssh_host]))
                         continue
